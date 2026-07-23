@@ -3,7 +3,10 @@
 This repository contains inference scripts and utilities for running the Anchor3DLane model using ONNX Runtime. The scripts are primarily set up to read video or image data, pass it through an ONNX model, and overlay 3D lane proposals onto 2D frames, as well as generate Bird's Eye View (BEV) visualizations.
 
 ### 🖼️ Example Result
-![Inference Result](data/images/result.png)
+<p align="center">
+  <img src="data/images/result.png" width="48%" />
+  <img src="data/images/BEV.png" width="48%" />
+</p>
 
 ## Instructions to Run Files
 
