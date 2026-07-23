@@ -1,0 +1,5 @@
+venv
+videos
+*.pth
+*.pth.zip
+*.mp4
