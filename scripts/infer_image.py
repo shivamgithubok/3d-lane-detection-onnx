@@ -9,8 +9,9 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.inference.postprocess import postprocess_onnx_output, decode_lane_pixels
 
 MODEL_PATH = "models/anchor3dlane_raw.onnx"
-IMAGE_PATH = "data/images/video_frame_60.jpg"
-OUTPUT_PATH = "output/video_frame_60_annotated.jpg"
+IMAGE_PATH = "data/images/video_frame_60.jpg" if os.path.exists("data/images/video_frame_60.jpg") else "data/images/example.jpg"
+OUTPUT_PATH = "output/annotated_result.jpg"
+os.makedirs("output", exist_ok=True)
 
 IMG_NORM_MEAN = np.array([123.675, 116.28, 103.53], dtype=np.float32)
 IMG_NORM_STD  = np.array([58.395, 57.12, 57.375], dtype=np.float32)
