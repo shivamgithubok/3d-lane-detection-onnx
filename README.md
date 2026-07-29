@@ -1,6 +1,15 @@
-# 🛣️ Anchor3DLane Jetson Inference & TensorRT GPU Acceleration
+# 🛣️ Anchor3DLane Jetson Inference & TensorRT GPU Acceleration + YOLO ByteTrack CIPO Pipeline
 
-This repository provides real-time 3D lane detection inference utilities optimized for **NVIDIA Jetson Orin** edge GPUs. It features high-speed TensorRT `.engine` GPU acceleration, 3D-to-2D perspective projection onto front-view camera frames, real-world Bird's Eye View (BEV) mapping in meters, and live FPS benchmarking.
+This repository provides real-time 3D lane detection and **CIPO (Closest In-Path Object)** collision alert utilities optimized for **NVIDIA Jetson Orin** edge GPUs. It features high-speed TensorRT `.engine` GPU acceleration, 3D-to-2D perspective projection onto front-view camera frames, real-world Bird's Eye View (BEV) mapping in meters, **YOLO ByteTrack multi-object tracking (Cars & Trucks)**, and real-time CIPO alert telemetry.
+
+---
+
+## 🎬 Live Pipeline Demo Video
+
+[![CIPO Pipeline Demo Video](output/example_3_cipo_bytetrack_fixed.mp4)](file:///home/elevatics/Projects/3d-lane-detection-onnx/output/example_3_cipo_bytetrack_fixed.mp4)
+
+> **Demo Output Video:** [output/example_3_cipo_bytetrack_fixed.mp4](file:///home/elevatics/Projects/3d-lane-detection-onnx/output/example_3_cipo_bytetrack_fixed.mp4)
+> Features real-time 3-panel split view: **Front View** (3D lane lines + ByteTrack bounding boxes + CIPO alert header), **Bird's Eye View (BEV)** (real-world 3D lane grid & vehicle positions in meters), and **Telemetry HUD** (live FPS & CIPO range).
 
 ---
 
@@ -9,8 +18,9 @@ This repository provides real-time 3D lane detection inference utilities optimiz
 | Model Execution Mode | Platform / Engine | Latency (ms) | Inference Speed | Speedup |
 | :--- | :--- | :--- | :--- | :--- |
 | **CPU ONNX Inference** | ARM Cortex CPU | ~1,665 ms | ~0.6 FPS | Baseline |
-| **TensorRT GPU Engine (FP16)** | **NVIDIA Orin GPU** | **~9.6 ms** | **103.7 FPS (Peak)** / **74.7 FPS (Sustained)** | **~125x Faster** 🚀 |
-| **End-to-End Real-Time Video** | **NVIDIA Orin GPU** | **~28.5 ms** | **~35.2 FPS (Live Stream)** | Real-Time Real-World |
+| **3D Lane Model Only (TensorRT FP16)** | **NVIDIA Orin GPU** | **~9.6 ms** | **103.7 FPS (Peak)** / **74.7 FPS (Sustained)** | **~125x Faster** 🚀 |
+| **End-to-End Real-Time Video (3D Lane Only)** | **NVIDIA Orin GPU** | **~28.5 ms** | **~35.2 FPS (Live Stream)** | Real-Time Real-World |
+| **3D Lane + YOLO ByteTrack CIPO Pipeline** | **NVIDIA Orin GPU** | **~30.1 ms** | **~33.1 FPS (Live Stream)** | Full CIPO ADAS System |
 
 ---
 
@@ -22,29 +32,31 @@ This repository provides real-time 3D lane detection inference utilities optimiz
 │   └── images/                     # Input images and sample MP4 videos
 │       ├── example.jpg
 │       ├── example_1.mp4
-│       └── example_2.mp4
+│       ├── example_2.mp4
+│       └── example_3.mp4
 ├── models/
 │   ├── anchor3dlane_raw.onnx        # ONNX Model weights file (Git LFS)
-│   └── anchor3dlane_raw.engine      # Compiled TensorRT FP16 GPU Engine
+│   ├── anchor3dlane_raw.engine      # Compiled TensorRT FP16 GPU Engine
+│   └── yolov8n.pt                   # YOLO PyTorch model weights for vehicle tracking
 ├── output/                         # Generated annotated images & video outputs
-│   ├── tensorrt_annotated.jpg
-│   └── example_2_annotated.mp4
+│   ├── example_3_cipo_bytetrack_fixed.mp4 # CIPO Pipeline output video
+│   ├── example_2_annotated.mp4
+│   └── tensorrt_annotated.jpg
 ├── scripts/
-│   ├── infer_tensorrt.py           # TensorRT GPU inference on single image
+│   ├── infer_cipo_pipeline.py      # Real-Time 3D Lane + YOLO ByteTrack CIPO Pipeline
 │   ├── infer_video_tensorrt.py     # Real-time TensorRT video stream + live FPS & BEV map
+│   ├── infer_tensorrt.py           # TensorRT GPU inference on single image
 │   ├── benchmark_fps.py            # Latency and FPS benchmarking script
-│   ├── infer_image.py              # ONNX Runtime single image inference
-│   ├── infer_video.py              # ONNX Runtime video stream inference
 │   ├── tune_calibration.py         # Camera extrinsic/intrinsic calibration tuner
-│   ├── extract_frame.py            # Video frame extraction utility
-│   └── debug/
-│       ├── debug_projections.py    # Pixel coordinate projection validator
-│       └── debug_scores.py         # Raw confidence score analyzer
+│   └── extract_frame.py            # Video frame extraction utility
 ├── src/
 │   ├── inference/
+│   │   ├── cipo_tracker.py         # 3D ground projection & lane ROI in-path filtering
+│   │   ├── object_detector.py      # YOLO ByteTrack detector (Car & Truck tracking)
 │   │   └── postprocess.py          # Softmax, NMS, and 3D-to-2D projection decoding
 │   └── utils/
 │       ├── calibration.py          # Camera pitch & height 3x4 projection matrix P
+│       ├── split_visualization.py  # 3-Panel Split Window UI (Front View + BEV + HUD)
 │       └── visualization.py        # Top-down Bird's Eye View (BEV) rendering (meters)
 ├── requirements.txt                # Python package dependencies
 └── README.md                       # Project documentation & usage guide
@@ -54,23 +66,31 @@ This repository provides real-time 3D lane detection inference utilities optimiz
 
 ## 🚀 Quick Start (Automatic Setup & Run)
 
-Run the automated setup script to automatically install system dependencies, fetch model weights, configure Python `venv`, and compile the TensorRT GPU engine:
+Run the automated setup script to install system dependencies, fetch model weights via Git LFS, configure Python virtual environment, and run inference:
 
 ```bash
 # 1. Run 1-step automatic setup
 chmod +x setup.sh
 ./setup.sh
 
-# 2. Run GPU TensorRT inference on an image
-./venv/bin/python3 scripts/infer_tensorrt.py
+# 2. Run 3D Lane + YOLO ByteTrack CIPO Pipeline (New)
+./venv/bin/python3 scripts/infer_cipo_pipeline.py --video data/images/example_3.mp4 --output output/example_3_cipo_bytetrack_fixed.mp4
 
-# 3. Run real-time GPU TensorRT inference on video with live FPS & BEV display
+# 3. Run 3D Lane + YOLO ByteTrack CIPO Pipeline (Headless Mode)
+./venv/bin/python3 scripts/infer_cipo_pipeline.py --video data/images/example_3.mp4 --output output/example_3_cipo_bytetrack_fixed.mp4 --no-gui
+
+# 4. Run Standalone 3D Lane Video Inference
 ./venv/bin/python3 scripts/infer_video_tensorrt.py data/images/example_2.mp4
+
+# 5. Run Single Image TensorRT GPU Inference
+./venv/bin/python3 scripts/infer_tensorrt.py
 ```
 
 ---
 
 ## 🛠️ Manual Step-by-Step Setup
+
+### 1. System Dependencies Installation
 
 Install the required CUDA development libraries, TensorRT, and OpenCV GUI packages:
 
@@ -98,15 +118,15 @@ python3 -m venv --without-pip venv
 curl -sS https://bootstrap.pypa.io/get-pip.py -o get-pip.py
 ./venv/bin/python3 get-pip.py && rm get-pip.py
 
-# Install Python requirements
-./venv/bin/pip install "numpy<2" opencv-python-headless pycuda onnxruntime
+# Install Python requirements & dependencies
+./venv/bin/pip install "numpy<2" opencv-python pycuda onnxruntime ultralytics torch torchvision
 
 # Link system TensorRT and OpenCV modules to venv
 cp -r /usr/lib/python3.12/dist-packages/tensorrt* ./venv/lib/python3.12/site-packages/
 cp -r /usr/lib/python3/dist-packages/cv2* ./venv/lib/python3.12/site-packages/
 ```
 
-### 3. Fetching the Model Weights (Git LFS)
+### 3. Fetching Model Weights (Git LFS)
 
 Ensure Git LFS is installed and pull the actual 52 MB `.onnx` binary weights file:
 
@@ -131,24 +151,23 @@ trtexec --onnx=models/anchor3dlane_raw.onnx \
 
 ## 🚀 Running Inference & Benchmarking
 
-### 1. Single Image TensorRT GPU Inference
-Run high-speed GPU inference on a single static image:
+### 1. 3D Lane + YOLO ByteTrack CIPO Pipeline
+Run the full CIPO detection and tracking pipeline:
 
 ```bash
-./venv/bin/python3 scripts/infer_tensorrt.py
+./venv/bin/python3 scripts/infer_cipo_pipeline.py --video data/images/example_3.mp4 --output output/example_3_cipo_bytetrack_fixed.mp4
 ```
-> **Output:** Reports GPU inference time (~9-14 ms) and saves the annotated image to `output/tensorrt_annotated.jpg`.
+> **Features:**
+> - **ByteTrack Multi-Object Tracking:** Tracks Cars & Trucks with persistent tracking IDs (`Car #1`, `Truck #2`).
+> - **3D Lane ROI Filtering:** Projects 2D vehicle boxes to 3D ground space $(X, Y)$ meters and tests if they lie inside the driving lane corridor.
+> - **CIPO Distance Telemetry:** Identifies the Closest In-Path Object and triggers proportional risk alerts (`DANGER` $<15\text{m}$, `WARNING` $15-30\text{m}$, `SAFE` $>30\text{m}$).
 
-### 2. Real-Time Video Stream GPU Inference
-Run real-time video stream inference with live FPS overlay and Bird's Eye View (BEV) visualization:
+### 2. Standalone 3D Lane TensorRT GPU Inference
+Run real-time 3D lane inference with live FPS overlay and Bird's Eye View (BEV) visualization:
 
 ```bash
 ./venv/bin/python3 scripts/infer_video_tensorrt.py data/images/example_2.mp4
 ```
-> **Features:** 
-> - Displays **Front View** with green 3D lane overlays and on-screen **Live GPU FPS counter**.
-> - Displays **Bird's Eye View (BEV)** map plotting lane lines in real-world meters ($0\text{m} - 100\text{m}$).
-> - Saves annotated video output to `output/example_2_annotated.mp4`.
 
 ### 3. Benchmark Core GPU Engine FPS via `trtexec`
 Measure pure GPU throughput over 100+ iterations:
