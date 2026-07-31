@@ -1,5 +1,6 @@
 import numpy as np
 import cv2
+from src.utils.drivable_area import extract_ego_corridor_3d
 
 # BEV Canvas dimensions (Height x Width)
 BEV_HEIGHT = 700
@@ -7,7 +8,6 @@ BEV_WIDTH = 500
 BEV_CANVAS_SIZE = (BEV_HEIGHT, BEV_WIDTH)
 
 # Realistic lateral & forward coordinate bounds (in meters)
-# X_RANGE (-8m to +8m) widens adjacent lanes so they look realistic (3.7m lane = ~115px)
 X_RANGE = (-8.0, 8.0)
 Y_RANGE = (0.0, 80.0)
 
@@ -17,9 +17,9 @@ def world_to_canvas(x, y):
     py = int(BEV_HEIGHT - (y - Y_RANGE[0]) / (Y_RANGE[1] - Y_RANGE[0]) * (BEV_HEIGHT - 60) - 40)
     return px, py
 
-def draw_bev(proposals, anchor_y_steps, anchor_len=20):
+def draw_bev(proposals, anchor_y_steps, anchor_len=20, cipo_status="SAFE"):
     """
-    Renders a clean, realistic top-down Bird's Eye View (BEV) map.
+    Renders a clean, realistic top-down Bird's Eye View (BEV) map with drivable corridor and 2px lane lines.
     """
     # 1. Dark sleek road background
     canvas = np.full((BEV_HEIGHT, BEV_WIDTH, 3), (22, 27, 34), dtype=np.uint8)
@@ -29,13 +29,26 @@ def draw_bev(proposals, anchor_y_steps, anchor_len=20):
     right_road_x, _ = world_to_canvas(6.0, 0)
     cv2.rectangle(canvas, (left_road_x, 0), (right_road_x, BEV_HEIGHT), (30, 35, 43), -1)
 
-    # 3. Longitudinal distance gridlines (every 10 meters)
+    # 3. Draw Drivable Area Corridor Polygon (Green for Safe / Red for Danger)
+    left_3d, right_3d = extract_ego_corridor_3d(proposals, anchor_len)
+    if left_3d is not None and right_3d is not None:
+        pts_left_bev = [world_to_canvas(x, y) for x, y, _ in left_3d]
+        pts_right_bev = [world_to_canvas(x, y) for x, y, _ in right_3d]
+        poly_bev = np.array(pts_left_bev + pts_right_bev[::-1], dtype=np.int32)
+
+        overlay = canvas.copy()
+        # Dynamic corridor color: Red for DANGER (<15m), Green (0, 255, 128) for SAFE
+        corridor_color = (0, 30, 220) if cipo_status == "DANGER" else (0, 255, 128)
+        cv2.fillPoly(overlay, [poly_bev], corridor_color)
+        cv2.addWeighted(overlay, 0.35, canvas, 0.65, 0, canvas)
+
+    # 4. Longitudinal distance gridlines (every 10 meters)
     for y_m in range(10, 81, 10):
         _, py = world_to_canvas(0, y_m)
         cv2.line(canvas, (left_road_x, py), (right_road_x, py), (48, 54, 65), 1, cv2.LINE_AA)
         cv2.putText(canvas, f"{y_m}m", (12, py + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (120, 130, 145), 1, cv2.LINE_AA)
 
-    # 4. Lateral position gridlines (every 2 meters)
+    # 5. Lateral position gridlines (every 2 meters)
     for x_m in [-4.0, -2.0, 0.0, 2.0, 4.0]:
         px, _ = world_to_canvas(x_m, 0)
         line_color = (65, 75, 90) if x_m != 0.0 else (90, 105, 125)
@@ -46,7 +59,7 @@ def draw_bev(proposals, anchor_y_steps, anchor_len=20):
         else:
             cv2.putText(canvas, "0m (Ego)", (px - 22, BEV_HEIGHT - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 200, 255), 1, cv2.LINE_AA)
 
-    # 5. Draw 3D detected lane lines
+    # 6. Draw sleek 2px 3D detected lane lines (thickness=2)
     if proposals is not None and len(proposals) > 0:
         for idx, lane in enumerate(proposals):
             if isinstance(lane, np.ndarray) and lane.ndim == 2 and lane.shape[1] == 3:
@@ -61,24 +74,23 @@ def draw_bev(proposals, anchor_y_steps, anchor_len=20):
             valid_pts = [(px, py) for px, py in pts_canvas if 0 <= px < BEV_WIDTH and 0 <= py < BEV_HEIGHT]
 
             if len(valid_pts) > 1:
-                # Color code lanes based on lateral offset
                 mean_x = np.mean([wx for wx, wy in pts_world])
                 if abs(mean_x) < 2.0:
-                    lane_color = (0, 255, 128) # Ego lane lines (Glowing Green)
+                    lane_color = (255, 180, 0) # Ego lane lines (Electric Cyan)
                 elif mean_x < 0:
-                    lane_color = (255, 200, 0) # Left adjacent lane (Cyan/Yellow)
+                    lane_color = (0, 215, 255) # Left adjacent lane (Gold)
                 else:
-                    lane_color = (0, 215, 255) # Right adjacent lane (Gold)
+                    lane_color = (255, 200, 0) # Right adjacent lane (Light Cyan)
 
-                # Draw smooth anti-aliased lane polyline
+                # Draw sleek 2px lane polyline (thickness=2)
                 for i in range(1, len(valid_pts)):
-                    cv2.line(canvas, valid_pts[i-1], valid_pts[i], lane_color, 3, cv2.LINE_AA)
+                    cv2.line(canvas, valid_pts[i-1], valid_pts[i], lane_color, 2, cv2.LINE_AA)
 
                 # Draw node points
                 for p in valid_pts[::2]:
-                    cv2.circle(canvas, p, 3, (255, 255, 255), -1, cv2.LINE_AA)
+                    cv2.circle(canvas, p, 2, (255, 255, 255), -1, cv2.LINE_AA)
 
-    # 6. Render Ego Vehicle Icon at bottom center
+    # 7. Render Ego Vehicle Icon at bottom center
     ego_px, ego_py = world_to_canvas(0.0, 0.0)
     car_w, car_h = 24, 40
     top_left = (ego_px - car_w // 2, ego_py - car_h // 2)

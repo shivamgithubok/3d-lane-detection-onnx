@@ -6,79 +6,109 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from src.utils.visualization import draw_bev
 from src.inference.postprocess import ANCHOR_Y_STEPS, decode_lane_pixels
+from src.utils.drivable_area import extract_ego_corridor_3d, get_ego_corridor_2d_pixels
 
-def draw_front_view_cipo(frame, proposals, objects, cipo_obj, P_matrix):
+def draw_futuristic_corner_bbox(img, pt1, pt2, color, thickness=2, corner_len=14):
+    """Renders futuristic cybernetic corner brackets around detected vehicle bounding boxes."""
+    x1, y1 = pt1
+    x2, y2 = pt2
+    w = x2 - x1
+    h = y2 - y1
+    c_len = min(corner_len, w // 4, h // 4)
+
+    # Top-Left corner
+    cv2.line(img, (x1, y1), (x1 + c_len, y1), color, thickness, cv2.LINE_AA)
+    cv2.line(img, (x1, y1), (x1, y1 + c_len), color, thickness, cv2.LINE_AA)
+
+    # Top-Right corner
+    cv2.line(img, (x2, y1), (x2 - c_len, y1), color, thickness, cv2.LINE_AA)
+    cv2.line(img, (x2, y1), (x2, y1 + c_len), color, thickness, cv2.LINE_AA)
+
+    # Bottom-Left corner
+    cv2.line(img, (x1, y2), (x1 + c_len, y2), color, thickness, cv2.LINE_AA)
+    cv2.line(img, (x1, y2), (x1, y2 - c_len), color, thickness, cv2.LINE_AA)
+
+    # Bottom-Right corner
+    cv2.line(img, (x2, y2), (x2 - c_len, y2), color, thickness, cv2.LINE_AA)
+    cv2.line(img, (x2, y2), (x2, y2 - c_len), color, thickness, cv2.LINE_AA)
+
+
+def draw_front_view_cipo(frame, proposals, objects, cipo_obj, P_matrix, show_drivable=True):
     """
-    Renders front camera view with properly scaled 3D projected lanes, tracked cars/trucks, and CIPO alerts.
+    Renders front camera view with 2px Electric Cyan 3D projected lanes, Translucent Green Drivable Corridor,
+    and cybernetic vehicle bounding boxes (Yellow for >15m in-path, Red for <15m danger, Cyan for adjacent).
     """
     annotated = frame.copy()
     h_img, w_img = annotated.shape[:2]
 
-    # Coordinate scaling from model space (480x360) to camera image space (w_img, h_img)
     scale_x = w_img / 480.0
     scale_y = h_img / 360.0
 
-    # 1. Draw 3D Lane Lines with correct resolution scaling
+    in_path_objs = [obj for obj in objects if obj['in_path']]
+    min_dist_in_path = min([obj['Z_3d'] for obj in in_path_objs]) if in_path_objs else 999.0
+
+    # 1. Render Translucent Drivable Area Corridor
+    if show_drivable and proposals is not None:
+        poly_2d = get_ego_corridor_2d_pixels(proposals, P_matrix, img_size=(480, 360), target_size=(w_img, h_img), safety_offset_m=0.0)
+        if poly_2d is not None and len(poly_2d) > 2:
+            overlay = annotated.copy()
+            # Emerald Green (0, 255, 128) for safe drivable path, Red (0, 30, 255) for danger <15m
+            corridor_color = (0, 30, 255) if min_dist_in_path < 15.0 else (0, 255, 128)
+            cv2.fillPoly(overlay, [poly_2d], corridor_color)
+            cv2.addWeighted(overlay, 0.35, annotated, 0.65, 0, annotated)
+
+            # Draw corridor outline edges (thickness=2)
+            n_pts = len(poly_2d) // 2
+            left_edge = poly_2d[:n_pts]
+            right_edge = poly_2d[n_pts:]
+            cv2.polylines(annotated, [left_edge], isClosed=False, color=(0, 255, 200), thickness=2, lineType=cv2.LINE_AA)
+            cv2.polylines(annotated, [right_edge], isClosed=False, color=(0, 255, 200), thickness=2, lineType=cv2.LINE_AA)
+
+    # 2. Draw 3D Lane Lines in Electric Cyan / Blue (thickness=2)
     if proposals is not None:
         for lane in proposals:
             pts = decode_lane_pixels(lane, P_matrix)
             draw_pts = [(int(u * scale_x), int(v * scale_y)) for u, v in pts if 0 <= u < 480 and 0 <= v < 360]
             for i in range(1, len(draw_pts)):
-                cv2.line(annotated, draw_pts[i-1], draw_pts[i], (0, 255, 0), 3, cv2.LINE_AA)
+                cv2.line(annotated, draw_pts[i-1], draw_pts[i], (255, 180, 0), 2, cv2.LINE_AA)
 
-    # 2. Draw Bounding Boxes for Tracked Cars & Trucks (ByteTrack)
+    # 3. Draw Cyberpunk Bounding Boxes & Distance Telemetry for Vehicles
     for obj in objects:
         x1, y1, x2, y2 = obj['bbox']
-        color = obj['color']
-        is_cipo = obj['is_cipo']
-        thickness = 3 if is_cipo else 2
         track_id = obj.get('track_id', -1)
+        color = obj['color'] # Yellow for >15m in-path, Red for <15m danger, Cyan for adjacent
+        dist_m = obj['Z_3d']
 
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thickness)
+        # Semi-transparent box background tint
+        box_overlay = annotated.copy()
+        cv2.rectangle(box_overlay, (x1, y1), (x2, y2), color, -1)
+        cv2.addWeighted(box_overlay, 0.12, annotated, 0.88, 0, annotated)
 
-        id_str = f"#{track_id} " if track_id > 0 else ""
-        label_text = f"{id_str}{obj['label'].upper()} {obj['Z_3d']:.1f}m"
-        if is_cipo:
-            label_text = f"CIPO {id_str}{obj['label'].upper()}: {obj['Z_3d']:.1f}m [{obj['status']}]"
+        # Futuristic cybernetic corner brackets (thickness=2)
+        draw_futuristic_corner_bbox(annotated, (x1, y1), (x2, y2), color, thickness=2, corner_len=14)
 
-        t_size = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
-        cv2.rectangle(annotated, (x1, y1 - t_size[1] - 6), (x1 + t_size[0] + 6, y1), color, -1)
-        cv2.putText(annotated, label_text, (x1 + 3, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+        # Clean label format: 'VEH 03 - 19.1m' or 'TRK 08 - 28.4m'
+        class_code = "TRK" if "truck" in obj['label'].lower() or "bus" in obj['label'].lower() else "VEH"
+        id_str = f" {track_id:02d}" if track_id > 0 else ""
+        label_text = f"{class_code}{id_str} - {dist_m:.1f}m"
 
-        u_bot = int((x1 + x2) / 2)
-        cv2.circle(annotated, (u_bot, y2), 5, color, -1)
-
-    # 3. Alert Header Overlay
-    if cipo_obj is not None:
-        status = cipo_obj['status']
-        dist = cipo_obj['Z_3d']
-        track_id = cipo_obj.get('track_id', -1)
-        id_str = f"#{track_id} " if track_id > 0 else ""
-
-        if status == "DANGER":
-            alert_text = f"CRITICAL FCW ALERT: {cipo_obj['label'].upper()} {id_str}{dist:.1f}m AHEAD IN LANE!"
-            bg_color = (0, 0, 220)
-        elif status == "WARNING":
-            alert_text = f"CIPO WARNING: {cipo_obj['label'].upper()} {id_str}IN LANE AT {dist:.1f}m"
-            bg_color = (0, 180, 220)
-        else:
-            alert_text = f"CIPO TRACKED: {cipo_obj['label'].upper()} {id_str}{dist:.1f}m (SAFE)"
-            bg_color = (0, 150, 0)
-
-        cv2.rectangle(annotated, (0, 0), (w_img, 36), bg_color, -1)
-        cv2.putText(annotated, alert_text, (15, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
-    else:
-        cv2.rectangle(annotated, (0, 0), (w_img, 36), (40, 40, 40), -1)
-        cv2.putText(annotated, "CIPO STATUS: LANE CLEAR (NO TARGET IN ROI)", (15, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1, cv2.LINE_AA)
+        t_size = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0]
+        cv2.rectangle(annotated, (x1, y1 - t_size[1] - 8), (x1 + t_size[0] + 8, y1), color, -1)
+        cv2.putText(annotated, label_text, (x1 + 4, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
 
     return annotated
 
 
-def draw_bev_cipo(proposals, objects, max_z=60.0):
+def draw_bev_cipo(proposals, objects, max_z=60.0, cipo_status="SAFE"):
     """
-    Renders top-down Bird's Eye View (BEV) map showing 3D lane lines and object positions.
+    Renders top-down Bird's Eye View (BEV) map showing 3D lane lines, drivable area, and object positions.
+    (Ego tracking lines removed from BEV map as requested).
     """
-    bev = draw_bev(proposals, ANCHOR_Y_STEPS)
+    in_path_objs = [obj for obj in objects if obj['in_path']]
+    min_dist_in_path = min([obj['Z_3d'] for obj in in_path_objs]) if in_path_objs else 999.0
+    status_bev = "DANGER" if min_dist_in_path < 15.0 else "SAFE"
+
+    bev = draw_bev(proposals, ANCHOR_Y_STEPS, cipo_status=status_bev)
     h_bev, w_bev = bev.shape[:2]
 
     def world_to_bev_px(x, y):
@@ -93,18 +123,14 @@ def draw_bev_cipo(proposals, objects, max_z=60.0):
             px, py = world_to_bev_px(x_3d, y_3d)
             if 0 <= px < w_bev and 0 <= py < h_bev:
                 color = obj['color']
-                radius = 8 if obj['is_cipo'] else 5
-                thickness = -1 if obj['is_cipo'] else 2
-                cv2.circle(bev, (px, py), radius, color, thickness)
+                radius = 6 if obj['in_path'] else 4
+                cv2.circle(bev, (px, py), radius, color, -1)
 
                 track_id = obj.get('track_id', -1)
                 id_str = f"#{track_id} " if track_id > 0 else ""
-                label = f"{id_str}{y_3d:.1f}m"
-                if obj['is_cipo']:
-                    label = f"CIPO {id_str}{y_3d:.1f}m"
-                    ego_px, ego_py = world_to_bev_px(0, 0)
-                    cv2.line(bev, (ego_px, ego_py), (px, py), color, 1, cv2.LINE_AA)
-
+                label = f"{id_str}{obj['label'].upper()}"
+                
+                # Render clean vehicle label on BEV map without ego tracking lines
                 cv2.putText(bev, label, (px + 8, py + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
 
     return bev
@@ -126,27 +152,16 @@ def create_split_window(front_view, bev_view, cipo_obj, fps_val, canvas_size=(72
 
     top_split = np.hstack((resized_front, resized_bev))
 
-    hud = np.ones((hud_height, target_w, 3), dtype=np.uint8) * 30
+    hud = np.ones((hud_height, target_w, 3), dtype=np.uint8) * 20
 
     cv2.putText(hud, f"PERFORMANCE: {fps_val:.1f} FPS", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
     cv2.putText(hud, "ENGINE: TensorRT FP16 + YOLO ByteTrack", (20, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1)
 
-    if cipo_obj is not None:
-        track_id = cipo_obj.get('track_id', -1)
-        id_str = f"#{track_id} " if track_id > 0 else ""
-        status_str = f"CIPO TARGET: {cipo_obj['label'].upper()} {id_str}[{cipo_obj['status']}]"
-        dist_str = f"RANGE: {cipo_obj['Z_3d']:.1f} meters"
-        pos_str = f"X-OFFSET: {cipo_obj['X_3d']:+.2f} m"
-        color = cipo_obj['color']
-    else:
-        status_str = "STATUS: NO IN-PATH TARGET"
-        dist_str = "RANGE: --"
-        pos_str = "X-OFFSET: --"
-        color = (180, 180, 180)
+    status_text = "MONITOR: DRIVABLE AREA SAFETY ACTIVE"
+    color = (0, 255, 128)
 
-    cv2.putText(hud, status_str, (320, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
-    cv2.putText(hud, dist_str, (320, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
-    cv2.putText(hud, pos_str, (580, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    cv2.putText(hud, status_text, (320, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+    cv2.putText(hud, "RULES: <15m RED | 15-30m YELLOW | >30m GREEN", (320, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
 
     canvas = np.vstack((top_split, hud))
     return canvas

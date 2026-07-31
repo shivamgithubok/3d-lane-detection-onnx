@@ -11,12 +11,12 @@ import pycuda.autoinit
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.inference.postprocess import postprocess_onnx_output, decode_lane_pixels
 from src.inference.cipo_tracker import CIPOTracker, DEFAULT_P_MATRIX
-from src.inference.object_detector import OfflineYOLOVehicleDetector
+from src.inference.trt_yolo_detector import TRTYOLOVehicleDetector
 from src.utils.split_visualization import draw_bev_cipo, draw_front_view_cipo, create_split_window
 
 ENGINE_PATH = "models/anchor3dlane_raw.engine"
 DEFAULT_VIDEO_PATH = "data/images/example_3.mp4"
-OUTPUT_VIDEO_PATH = "output/example_3_cipo_annotated.mp4"
+OUTPUT_VIDEO_PATH = "output/example_3_futuristic_adas.mp4"
 
 IMG_NORM_MEAN = np.array([123.675, 116.28, 103.53], dtype=np.float32)
 IMG_NORM_STD  = np.array([58.395, 57.12, 57.375], dtype=np.float32)
@@ -32,13 +32,13 @@ def preprocess(frame):
     mask = np.ascontiguousarray(mask)
     return img, mask, resized
 
-def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PATH, show_gui=True, max_frames=None):
+def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PATH, show_gui=True, max_frames=None, show_drivable=True):
     if not os.path.exists(video_path):
         print(f"Error: Video file {video_path} not found!")
         return
 
     print("================================================================")
-    print(" 🛣️  3D LANE + YOLO CIPO DETECTION PIPELINE (TensorRT Accelerated)")
+    print(" 🛣️  3D LANE + DRIVABLE AREA + YOLO CIPO (Futuristic ADAS UI)")
     print("================================================================")
 
     # 1. Initialize TensorRT Engine for Anchor3DLane
@@ -72,8 +72,8 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
     context.set_tensor_address("anchors", int(d_anchors))
 
     # 2. Initialize Object Detector & CIPO Tracker
-    print("[Pipeline] Initializing Object Detector & CIPO Tracker...")
-    detector = OfflineYOLOVehicleDetector()
+    print("[Pipeline] Initializing Dual-TensorRT Object Detector & CIPO Tracker...")
+    detector = TRTYOLOVehicleDetector("models/yolov8n.engine")
     tracker = CIPOTracker(P_matrix=DEFAULT_P_MATRIX, danger_dist=15.0, warning_dist=30.0)
 
     # 3. Open Video Source
@@ -85,7 +85,7 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     writer = cv2.VideoWriter(output_path, fourcc, 30.0, (1080, 720))
 
-    window_name = "Real-Time 3D Lane + YOLO CIPO Detection Pipeline"
+    window_name = "Real-Time 3D Lane + Drivable Area + YOLO CIPO ADAS Pipeline"
     if show_gui:
         try:
             cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -127,16 +127,19 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
         raw_detections = detector.detect(frame)
 
         # Step E: Process CIPO Tracker & 3D ROI In-Path Check
-        processed_objs, cipo_obj = tracker.process_detections(raw_detections, lane_proposals)
+        h_frame, w_frame = frame.shape[:2]
+        processed_objs, cipo_obj = tracker.process_detections(raw_detections, lane_proposals, frame_size=(w_frame, h_frame))
 
         t1 = time.time()
         frame_time = t1 - t0
         fps = 1.0 / max(0.001, frame_time)
         fps_history.append(fps)
 
+        cipo_status = cipo_obj['status'] if cipo_obj is not None else "SAFE"
+
         # Step F: Render 3-Panel Split Window (Front View + BEV + HUD)
-        front_view = draw_front_view_cipo(frame, lane_proposals, processed_objs, cipo_obj, DEFAULT_P_MATRIX)
-        bev_view = draw_bev_cipo(lane_proposals, processed_objs)
+        front_view = draw_front_view_cipo(frame, lane_proposals, processed_objs, cipo_obj, DEFAULT_P_MATRIX, show_drivable=show_drivable)
+        bev_view = draw_bev_cipo(lane_proposals, processed_objs, cipo_status=cipo_status)
 
         split_canvas = create_split_window(front_view, bev_view, cipo_obj, fps, canvas_size=(720, 1080))
 
@@ -180,10 +183,11 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
     print("================================================================\n")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Real-Time 3D Lane + YOLO CIPO Detection Pipeline")
+    parser = argparse.ArgumentParser(description="Real-Time 3D Lane + Drivable Area + YOLO CIPO ADAS Pipeline")
     parser.add_argument("--video", type=str, default=DEFAULT_VIDEO_PATH, help="Path to input MP4 video")
     parser.add_argument("--output", type=str, default=OUTPUT_VIDEO_PATH, help="Path to output MP4 video")
     parser.add_argument("--no-gui", action="store_true", help="Disable live GUI window display")
+    parser.add_argument("--no-drivable", action="store_true", help="Disable drivable area corridor overlay")
     parser.add_argument("--max-frames", type=int, default=None, help="Limit number of processed frames for benchmarking")
     args = parser.parse_args()
 
@@ -191,5 +195,6 @@ if __name__ == "__main__":
         video_path=args.video,
         output_path=args.output,
         show_gui=not args.no_gui,
-        max_frames=args.max_frames
+        max_frames=args.max_frames,
+        show_drivable=not args.no_drivable
     )

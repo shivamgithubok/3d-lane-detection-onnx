@@ -15,15 +15,13 @@ def homography_crop_resize(org_hw, crop_y, resize_hw):
                      [0, ratio_y, -ratio_y * crop_y],
                      [0, 0, 1]])
 
-# same generic assumptions Anchor3DLane's own config already uses,
-# tuned for a forward-facing dashcam roughly this height/tilt
+# Original camera extrinsics
 CAM_HEIGHT = 1.5       # meters
-CAM_PITCH_DEG = -3      # degrees, downward tilt
+CAM_PITCH_DEG = -3     # degrees
 K = np.array([[2015.0, 0.0, 960.0],
               [0.0, 2015.0, 540.0],
-              [0.0, 0.0, 1.0]])   # generic intrinsics matched to a 1920x1280-ish sensor
+              [0.0, 0.0, 1.0]])   # Intrinsics for 1920x1280 camera sensor
 
 P_g2im = projection_g2im(np.radians(CAM_PITCH_DEG), CAM_HEIGHT, K)
 H_crop = homography_crop_resize([1280, 1920], 0, [360, 480])
 P_final = H_crop @ P_g2im
-print(P_final.tolist())
