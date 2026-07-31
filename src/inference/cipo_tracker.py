@@ -1,5 +1,6 @@
 import numpy as np
 from src.utils.drivable_area import find_ego_lanes
+from src.inference.postprocess import decode_lane_pixels
 
 # Camera Projection Matrix for cam_height = 1.5m and pitch = -3 degrees
 DEFAULT_P_MATRIX = np.array([
@@ -35,51 +36,35 @@ class CIPOTracker:
         X = float((Y * (P[2, 1] * u - P[0, 1])) / denom_x)
         return X, Y
 
-    def is_inside_drivable_area(self, X_obj, Y_obj, lane_proposals):
+    def get_2d_lane_u_at_v(self, lane_proposal, v_target):
         """
-        Checks if 3D coordinate (X_obj, Y_obj) lies strictly inside the 3D Ego Drivable Area Corridor.
-        Uses inner lateral threshold to prevent adjacent lane vehicles from triggering false in-path status.
+        Calculates the 2D projected u-pixel coordinate of a lane line at a specific v-pixel row.
         """
-        ego_left, ego_right = find_ego_lanes(lane_proposals, ANCHOR_LEN)
-        
-        if ego_left is None and ego_right is None:
-            return abs(X_obj) <= 1.25 and 0 < Y_obj <= 80.0
+        pts_2d = decode_lane_pixels(lane_proposal, self.P)
+        if len(pts_2d) < 2:
+            return None
 
-        X_left, X_right = None, None
+        us = [p[0] for p in pts_2d]
+        vs = [p[1] for p in pts_2d]
 
-        if ego_left is not None:
-            xs_l = ego_left[5:5 + ANCHOR_LEN]
-            vis_l = ego_left[5 + 2 * ANCHOR_LEN:5 + 3 * ANCHOR_LEN] > 0
-            if vis_l.sum() >= 2:
-                X_left = float(np.interp(Y_obj, ANCHOR_Y_STEPS[vis_l], xs_l[vis_l]))
+        # Sort by v ascending
+        order = np.argsort(vs)
+        vs = np.array(vs)[order]
+        us = np.array(us)[order]
 
-        if ego_right is not None:
-            xs_r = ego_right[5:5 + ANCHOR_LEN]
-            vis_r = ego_right[5 + 2 * ANCHOR_LEN:5 + 3 * ANCHOR_LEN] > 0
-            if vis_r.sum() >= 2:
-                X_right = float(np.interp(Y_obj, ANCHOR_Y_STEPS[vis_r], xs_r[vis_r]))
+        if v_target < vs[0] or v_target > vs[-1]:
+            return None
 
-        # Inner margin to avoid false positive triggers from adjacent lane vehicles
-        inner_margin = -0.30
-        if X_left is not None and X_right is not None:
-            X_min = min(X_left, X_right) - inner_margin
-            X_max = max(X_left, X_right) + inner_margin
-        elif X_left is not None:
-            X_min = X_left - inner_margin
-            X_max = X_left + 3.2
-        elif X_right is not None:
-            X_min = X_right - 3.2
-            X_max = X_right + inner_margin
-        else:
-            X_min, X_max = -1.25, 1.25
+        u_interp = float(np.interp(v_target, vs, us))
+        return u_interp
 
-        return X_min <= X_obj <= X_max
-
-    def process_detections(self, detections, lane_proposals, frame_size=(1080, 720)):
+    def process_detections(self, detections, lane_proposals, frame_size=(1080, 720), depth_map=None, depth_estimator=None):
         processed_objects = []
         w_img, h_img = frame_size
         scale_u = 480.0 / float(w_img)
         scale_v = 360.0 / float(h_img)
+
+        ego_left, ego_right = find_ego_lanes(lane_proposals, ANCHOR_LEN)
 
         for det in detections:
             x1, y1, x2, y2 = det['bbox']
@@ -90,13 +75,34 @@ class CIPOTracker:
             u_model = u_img * scale_u
             v_model = v_img * scale_v
 
-            X_3d, Y_3d = self.project_2d_to_3d_ground(u_model, v_model)
+            # Query TensorRT Monocular Depth Engine for exact metric distance Z
+            if depth_map is not None and depth_estimator is not None:
+                Y_3d = depth_estimator.query_vehicle_depth(depth_map, det['bbox'], w_img, h_img)
+                denom_x = self.P[0, 0]
+                X_3d = float((Y_3d * (self.P[2, 1] * u_model - self.P[0, 1])) / denom_x)
+            else:
+                X_3d, Y_3d = self.project_2d_to_3d_ground(u_model, v_model)
 
             if Y_3d <= 0 or Y_3d > 100.0:
                 continue
 
-            # Check strictly inside Drivable Area Corridor
-            in_path = self.is_inside_drivable_area(X_3d, Y_3d, lane_proposals)
+            # 2D Camera-Space Lane Association Rule
+            u_left_2d = self.get_2d_lane_u_at_v(ego_left, v_model) if ego_left is not None else None
+            u_right_2d = self.get_2d_lane_u_at_v(ego_right, v_model) if ego_right is not None else None
+
+            # Determine lane membership directly in 2D Camera View
+            is_left_of_left_lane = (u_left_2d is not None) and (u_model < u_left_2d - 5.0)
+            is_right_of_right_lane = (u_right_2d is not None) and (u_model > u_right_2d + 5.0)
+
+            if is_left_of_left_lane:
+                in_path = False
+                X_3d = min(X_3d, -2.40)
+            elif is_right_of_right_lane:
+                in_path = False
+                X_3d = max(X_3d, +2.40)
+            else:
+                # Check strictly inside 3D Ego Drivable Corridor
+                in_path = abs(X_3d) <= 1.50
 
             if not in_path:
                 status = "OUT OF PATH"
@@ -114,7 +120,7 @@ class CIPOTracker:
                 'track_id': det.get('track_id', -1),
                 'conf': det.get('conf', 1.0),
                 'X_3d': X_3d,
-                'Z_3d': Y_3d, # Forward distance in meters
+                'Z_3d': Y_3d, # Metric forward distance in meters
                 'in_path': in_path,
                 'status': status,
                 'color': color,

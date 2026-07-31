@@ -6,7 +6,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from src.utils.visualization import draw_bev
 from src.inference.postprocess import ANCHOR_Y_STEPS, decode_lane_pixels
-from src.utils.drivable_area import extract_ego_corridor_3d, get_ego_corridor_2d_pixels
+from src.utils.drivable_area import extract_ego_corridor_3d, get_ego_corridor_2d_pixels, fill_missing_lane_gaps, find_ego_lanes
 
 def draw_futuristic_corner_bbox(img, pt1, pt2, color, thickness=2, corner_len=14):
     """Renders futuristic cybernetic corner brackets around detected vehicle bounding boxes."""
@@ -26,7 +26,7 @@ def draw_futuristic_corner_bbox(img, pt1, pt2, color, thickness=2, corner_len=14
 
     # Bottom-Left corner
     cv2.line(img, (x1, y2), (x1 + c_len, y2), color, thickness, cv2.LINE_AA)
-    cv2.line(img, (x1, y2), (x1, y2 - c_len), color, thickness, cv2.LINE_AA)
+    cv2.line(img, (x1, y2), (x1, y2 + c_len), color, thickness, cv2.LINE_AA)
 
     # Bottom-Right corner
     cv2.line(img, (x2, y2), (x2 - c_len, y2), color, thickness, cv2.LINE_AA)
@@ -35,8 +35,8 @@ def draw_futuristic_corner_bbox(img, pt1, pt2, color, thickness=2, corner_len=14
 
 def draw_front_view_cipo(frame, proposals, objects, cipo_obj, P_matrix, show_drivable=True):
     """
-    Renders front camera view with 2px Electric Cyan 3D projected lanes, Translucent Green Drivable Corridor,
-    and cybernetic vehicle bounding boxes (Yellow for >15m in-path, Red for <15m danger, Cyan for adjacent).
+    Renders front camera view with Translucent Green Drivable Corridor (left margin 0.50m, right margin 1.00m),
+    WITHOUT outer cyan line borders, hiding ego cyan lane lines, and showing cybernetic vehicle bounding boxes with pre-trained MiDaS depth.
     """
     annotated = frame.copy()
     h_img, w_img = annotated.shape[:2]
@@ -44,12 +44,18 @@ def draw_front_view_cipo(frame, proposals, objects, cipo_obj, P_matrix, show_dri
     scale_x = w_img / 480.0
     scale_y = h_img / 360.0
 
+    # Interpolate missing intermediate lane lines if gap >= 5.0m
+    if proposals is not None:
+        proposals = fill_missing_lane_gaps(proposals)
+
+    ego_left, ego_right = find_ego_lanes(proposals) if proposals is not None else (None, None)
+
     in_path_objs = [obj for obj in objects if obj['in_path']]
     min_dist_in_path = min([obj['Z_3d'] for obj in in_path_objs]) if in_path_objs else 999.0
 
-    # 1. Render Translucent Drivable Area Corridor
+    # 1. Render Translucent Drivable Area Corridor (Left margin = 0.50m, Right margin = 1.00m, NO outer border lines)
     if show_drivable and proposals is not None:
-        poly_2d = get_ego_corridor_2d_pixels(proposals, P_matrix, img_size=(480, 360), target_size=(w_img, h_img), safety_offset_m=0.0)
+        poly_2d = get_ego_corridor_2d_pixels(proposals, P_matrix, img_size=(480, 360), target_size=(w_img, h_img), left_margin=0.50, right_margin=1.00)
         if poly_2d is not None and len(poly_2d) > 2:
             overlay = annotated.copy()
             # Emerald Green (0, 255, 128) for safe drivable path, Red (0, 30, 255) for danger <15m
@@ -57,16 +63,15 @@ def draw_front_view_cipo(frame, proposals, objects, cipo_obj, P_matrix, show_dri
             cv2.fillPoly(overlay, [poly_2d], corridor_color)
             cv2.addWeighted(overlay, 0.35, annotated, 0.65, 0, annotated)
 
-            # Draw corridor outline edges (thickness=2)
-            n_pts = len(poly_2d) // 2
-            left_edge = poly_2d[:n_pts]
-            right_edge = poly_2d[n_pts:]
-            cv2.polylines(annotated, [left_edge], isClosed=False, color=(0, 255, 200), thickness=2, lineType=cv2.LINE_AA)
-            cv2.polylines(annotated, [right_edge], isClosed=False, color=(0, 255, 200), thickness=2, lineType=cv2.LINE_AA)
-
-    # 2. Draw 3D Lane Lines in Electric Cyan / Blue (thickness=2)
+    # 2. Draw 3D Lane Lines for ADJACENT lanes ONLY (Hiding Ego Left and Ego Right lines as requested)
     if proposals is not None:
         for lane in proposals:
+            # Skip drawing ego-left and ego-right lines
+            if ego_left is not None and np.array_equal(lane, ego_left):
+                continue
+            if ego_right is not None and np.array_equal(lane, ego_right):
+                continue
+
             pts = decode_lane_pixels(lane, P_matrix)
             draw_pts = [(int(u * scale_x), int(v * scale_y)) for u, v in pts if 0 <= u < 480 and 0 <= v < 360]
             for i in range(1, len(draw_pts)):
@@ -102,8 +107,10 @@ def draw_front_view_cipo(frame, proposals, objects, cipo_obj, P_matrix, show_dri
 def draw_bev_cipo(proposals, objects, max_z=60.0, cipo_status="SAFE"):
     """
     Renders top-down Bird's Eye View (BEV) map showing 3D lane lines, drivable area, and object positions.
-    (Ego tracking lines removed from BEV map as requested).
     """
+    if proposals is not None:
+        proposals = fill_missing_lane_gaps(proposals)
+
     in_path_objs = [obj for obj in objects if obj['in_path']]
     min_dist_in_path = min([obj['Z_3d'] for obj in in_path_objs]) if in_path_objs else 999.0
     status_bev = "DANGER" if min_dist_in_path < 15.0 else "SAFE"
@@ -129,8 +136,6 @@ def draw_bev_cipo(proposals, objects, max_z=60.0, cipo_status="SAFE"):
                 track_id = obj.get('track_id', -1)
                 id_str = f"#{track_id} " if track_id > 0 else ""
                 label = f"{id_str}{obj['label'].upper()}"
-                
-                # Render clean vehicle label on BEV map without ego tracking lines
                 cv2.putText(bev, label, (px + 8, py + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
 
     return bev
@@ -155,7 +160,7 @@ def create_split_window(front_view, bev_view, cipo_obj, fps_val, canvas_size=(72
     hud = np.ones((hud_height, target_w, 3), dtype=np.uint8) * 20
 
     cv2.putText(hud, f"PERFORMANCE: {fps_val:.1f} FPS", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
-    cv2.putText(hud, "ENGINE: TensorRT FP16 + YOLO ByteTrack", (20, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1)
+    cv2.putText(hud, "ENGINE: Triple TensorRT FP16 + YOLO ByteTrack + MiDaS Depth", (20, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1)
 
     status_text = "MONITOR: DRIVABLE AREA SAFETY ACTIVE"
     color = (0, 255, 128)

@@ -12,6 +12,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.inference.postprocess import postprocess_onnx_output, decode_lane_pixels
 from src.inference.cipo_tracker import CIPOTracker, DEFAULT_P_MATRIX
 from src.inference.trt_yolo_detector import TRTYOLOVehicleDetector
+from src.inference.trt_depth_estimator import TRTMonocularDepthEstimator
 from src.utils.split_visualization import draw_bev_cipo, draw_front_view_cipo, create_split_window
 
 ENGINE_PATH = "models/anchor3dlane_raw.engine"
@@ -72,8 +73,9 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
     context.set_tensor_address("anchors", int(d_anchors))
 
     # 2. Initialize Object Detector & CIPO Tracker
-    print("[Pipeline] Initializing Dual-TensorRT Object Detector & CIPO Tracker...")
+    print("[Pipeline] Initializing Triple-TensorRT Objects, Lanes & Depth Engines...")
     detector = TRTYOLOVehicleDetector("models/yolov8n.engine")
+    depth_estimator = TRTMonocularDepthEstimator("models/monocular_depth.engine")
     tracker = CIPOTracker(P_matrix=DEFAULT_P_MATRIX, danger_dist=15.0, warning_dist=30.0)
 
     # 3. Open Video Source
@@ -123,12 +125,19 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
         # Step C: Decode 3D Lane Proposals
         lane_proposals, lane_scores = postprocess_onnx_output(h_reg_proposals)
 
-        # Step D: Run Object Detection
+        # Step D: Run Object Detection & Monocular Depth Estimation
         raw_detections = detector.detect(frame)
+        depth_map, _, _ = depth_estimator.estimate_depth_map(frame)
 
         # Step E: Process CIPO Tracker & 3D ROI In-Path Check
         h_frame, w_frame = frame.shape[:2]
-        processed_objs, cipo_obj = tracker.process_detections(raw_detections, lane_proposals, frame_size=(w_frame, h_frame))
+        processed_objs, cipo_obj = tracker.process_detections(
+            raw_detections, 
+            lane_proposals, 
+            frame_size=(w_frame, h_frame),
+            depth_map=depth_map,
+            depth_estimator=depth_estimator
+        )
 
         t1 = time.time()
         frame_time = t1 - t0
