@@ -13,10 +13,12 @@ ANCHOR_LEN = 20
 ANCHOR_Y_STEPS = np.array([5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100], dtype=np.float64)
 
 class CIPOTracker:
-    def __init__(self, P_matrix=DEFAULT_P_MATRIX, danger_dist=15.0, warning_dist=30.0):
+    def __init__(self, P_matrix=DEFAULT_P_MATRIX, danger_dist=15.0, warning_dist=30.0, ema_alpha=0.35):
         self.P = P_matrix
         self.danger_dist = danger_dist  # < 15m DANGER (Red)
         self.warning_dist = warning_dist # 15m - 30m WARNING (Yellow)
+        self.ema_alpha = ema_alpha       # Temporal Exponential Moving Average smoothing factor
+        self.track_history = {}          # History dict for temporal smoothing per track_id
 
     def project_2d_to_3d_ground(self, u, v):
         """
@@ -29,9 +31,8 @@ class CIPOTracker:
         else:
             Y = float(P[1, 3] / denom_y)
 
-        Y = max(1.0, min(100.0, Y)) # Clamp to valid range
+        Y = max(1.0, min(100.0, Y))
 
-        # Lateral X coordinate
         denom_x = P[0, 0]
         X = float((Y * (P[2, 1] * u - P[0, 1])) / denom_x)
         return X, Y
@@ -47,7 +48,6 @@ class CIPOTracker:
         us = [p[0] for p in pts_2d]
         vs = [p[1] for p in pts_2d]
 
-        # Sort by v ascending
         order = np.argsort(vs)
         vs = np.array(vs)[order]
         us = np.array(us)[order]
@@ -68,29 +68,39 @@ class CIPOTracker:
 
         for det in detections:
             x1, y1, x2, y2 = det['bbox']
+            track_id = det.get('track_id', -1)
             u_img = (x1 + x2) / 2.0
             v_img = float(y2)
 
-            # Scale 2D pixel coordinates to model space (480x360) BEFORE projecting to 3D ground!
             u_model = u_img * scale_u
             v_model = v_img * scale_v
 
-            # Query TensorRT Monocular Depth Engine for exact metric distance Z
+            # 1. Measured 3D distance and lateral position
             if depth_map is not None and depth_estimator is not None:
-                Y_3d = depth_estimator.query_vehicle_depth(depth_map, det['bbox'], w_img, h_img)
+                Y_meas = depth_estimator.query_vehicle_depth(depth_map, det['bbox'], w_img, h_img)
                 denom_x = self.P[0, 0]
-                X_3d = float((Y_3d * (self.P[2, 1] * u_model - self.P[0, 1])) / denom_x)
+                X_meas = float((Y_meas * (self.P[2, 1] * u_model - self.P[0, 1])) / denom_x)
             else:
-                X_3d, Y_3d = self.project_2d_to_3d_ground(u_model, v_model)
+                X_meas, Y_meas = self.project_2d_to_3d_ground(u_model, v_model)
 
-            if Y_3d <= 0 or Y_3d > 100.0:
+            if Y_meas <= 0 or Y_meas > 100.0:
                 continue
 
-            # 2D Camera-Space Lane Association Rule
+            # 2. Temporal Moving Average (EMA) Depth Smoothing per track_id
+            if track_id > 0 and track_id in self.track_history:
+                hist = self.track_history[track_id]
+                X_3d = self.ema_alpha * X_meas + (1.0 - self.ema_alpha) * hist['X']
+                Y_3d = self.ema_alpha * Y_meas + (1.0 - self.ema_alpha) * hist['Z']
+            else:
+                X_3d, Y_3d = X_meas, Y_meas
+
+            if track_id > 0:
+                self.track_history[track_id] = {'X': X_3d, 'Z': Y_3d}
+
+            # 3. 2D Camera-Space Lane Association Rule
             u_left_2d = self.get_2d_lane_u_at_v(ego_left, v_model) if ego_left is not None else None
             u_right_2d = self.get_2d_lane_u_at_v(ego_right, v_model) if ego_right is not None else None
 
-            # Determine lane membership directly in 2D Camera View
             is_left_of_left_lane = (u_left_2d is not None) and (u_model < u_left_2d - 5.0)
             is_right_of_right_lane = (u_right_2d is not None) and (u_model > u_right_2d + 5.0)
 
@@ -101,26 +111,30 @@ class CIPOTracker:
                 in_path = False
                 X_3d = max(X_3d, +2.40)
             else:
-                # Check strictly inside 3D Ego Drivable Corridor
                 in_path = abs(X_3d) <= 1.50
 
             if not in_path:
                 status = "OUT OF PATH"
-                color = (255, 220, 0) # Electric Neon Cyan for adjacent / out of path vehicles
+                color = (255, 220, 0) # Electric Neon Cyan for adjacent
             elif Y_3d < self.danger_dist: # < 15m DANGER (RED)
                 status = "DANGER <15m"
-                color = (0, 0, 255) # RED for critical danger <15m inside drivable corridor
+                color = (0, 0, 255) # RED
             else: # > 15m IN PATH (YELLOW)
                 status = f"IN PATH ({Y_3d:.1f}m)"
-                color = (0, 215, 255) # YELLOW for vehicles inside drivable area at >15m distance!
+                color = (0, 215, 255) # YELLOW
+
+            # 4. Compute camera-space ground vertical position Y_ground (downward positive)
+            # From perspective equation v = (P[1,1]*Y_ground + P[1,2]*Z_3d + P[1,3]) / Z_3d
+            Y_ground = float(((v_model * Y_3d) - self.P[1, 2] * Y_3d - self.P[1, 3]) / (self.P[1, 1] + 1e-6))
 
             obj_info = {
                 'bbox': [int(x1), int(y1), int(x2), int(y2)],
                 'label': det.get('class', 'car'),
-                'track_id': det.get('track_id', -1),
+                'track_id': track_id,
                 'conf': det.get('conf', 1.0),
                 'X_3d': X_3d,
-                'Z_3d': Y_3d, # Metric forward distance in meters
+                'Z_3d': Y_3d,
+                'Y_ground': Y_ground,
                 'in_path': in_path,
                 'status': status,
                 'color': color,

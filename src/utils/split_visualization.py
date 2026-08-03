@@ -7,8 +7,9 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '.
 from src.utils.visualization import draw_bev
 from src.inference.postprocess import ANCHOR_Y_STEPS, decode_lane_pixels
 from src.utils.drivable_area import extract_ego_corridor_3d, get_ego_corridor_2d_pixels, fill_missing_lane_gaps, find_ego_lanes
+from src.utils.draw_3d_box import draw_3d_wireframe_box
 
-def draw_futuristic_corner_bbox(img, pt1, pt2, color, thickness=2, corner_len=14):
+def draw_futuristic_corner_bbox(img, pt1, pt2, color, thickness=1, corner_len=14):
     """Renders futuristic cybernetic corner brackets around detected vehicle bounding boxes."""
     x1, y1 = pt1
     x2, y2 = pt2
@@ -36,7 +37,7 @@ def draw_futuristic_corner_bbox(img, pt1, pt2, color, thickness=2, corner_len=14
 def draw_front_view_cipo(frame, proposals, objects, cipo_obj, P_matrix, show_drivable=True):
     """
     Renders front camera view with Translucent Green Drivable Corridor (left margin 0.50m, right margin 1.00m),
-    WITHOUT outer cyan line borders, hiding ego cyan lane lines, and showing cybernetic vehicle bounding boxes with pre-trained MiDaS depth.
+    hiding ego cyan lane lines, and rendering THIN RED 3D WIREFRAME CUBOID BOXES (thickness=1) for close/CIPO vehicles.
     """
     annotated = frame.copy()
     h_img, w_img = annotated.shape[:2]
@@ -77,20 +78,30 @@ def draw_front_view_cipo(frame, proposals, objects, cipo_obj, P_matrix, show_dri
             for i in range(1, len(draw_pts)):
                 cv2.line(annotated, draw_pts[i-1], draw_pts[i], (255, 180, 0), 2, cv2.LINE_AA)
 
-    # 3. Draw Cyberpunk Bounding Boxes & Distance Telemetry for Vehicles
+    # 3. Draw Red Thin 3D Wireframe Cuboids for CIPO / Close Vehicles & 2D Brackets for Far Vehicles
     for obj in objects:
         x1, y1, x2, y2 = obj['bbox']
         track_id = obj.get('track_id', -1)
-        color = obj['color'] # Yellow for >15m in-path, Red for <15m danger, Cyan for adjacent
+        color = obj['color']
         dist_m = obj['Z_3d']
+        is_close_or_cipo = obj.get('is_cipo', False) or (dist_m <= 25.0)
 
-        # Semi-transparent box background tint
-        box_overlay = annotated.copy()
-        cv2.rectangle(box_overlay, (x1, y1), (x2, y2), color, -1)
-        cv2.addWeighted(box_overlay, 0.12, annotated, 0.88, 0, annotated)
-
-        # Futuristic cybernetic corner brackets (thickness=2)
-        draw_futuristic_corner_bbox(annotated, (x1, y1), (x2, y2), color, thickness=2, corner_len=14)
+        if is_close_or_cipo:
+            # Render Thin Red 3D Wireframe Cuboid Box (thickness=1, color=0,0,255)
+            draw_3d_wireframe_box(
+                annotated, 
+                (x1, y1, x2, y2), 
+                distance_z=dist_m, 
+                is_truck=("truck" in obj['label'].lower() or "bus" in obj['label'].lower()), 
+                color=(0, 0, 255), 
+                thickness=1
+            )
+        else:
+            # Render 2D Cyber Corner Brackets for distant vehicles (>25m)
+            box_overlay = annotated.copy()
+            cv2.rectangle(box_overlay, (x1, y1), (x2, y2), color, -1)
+            cv2.addWeighted(box_overlay, 0.12, annotated, 0.88, 0, annotated)
+            draw_futuristic_corner_bbox(annotated, (x1, y1), (x2, y2), color, thickness=1, corner_len=14)
 
         # Clean label format: 'VEH 03 - 19.1m' or 'TRK 08 - 28.4m'
         class_code = "TRK" if "truck" in obj['label'].lower() or "bus" in obj['label'].lower() else "VEH"
