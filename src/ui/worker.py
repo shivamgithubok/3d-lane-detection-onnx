@@ -7,19 +7,18 @@ Runs:
  4. CIPO Tracker & Drivable Area Corridor Pipeline
 """
 
-import time
-import os
 import cv2
 import numpy as np
+import os
+import time
 from PySide6.QtCore import QThread, Signal
-
-# Import project pipeline modules
-from src.inference.postprocess import postprocess_onnx_output, ANCHOR_Y_STEPS
+from src.inference.postprocess import postprocess_onnx_output
 from src.utils.drivable_area import extract_ego_corridor_3d
 from src.tracking.lane_association import LaneTrackerManager
 from src.inference.cipo_tracker import CIPOTracker, DEFAULT_P_MATRIX
 from src.inference.trt_yolo_detector import TRTYOLOVehicleDetector
 from src.inference.trt_depth_estimator import TRTMonocularDepthEstimator
+from src.inference.object_detector import OfflineYOLOVehicleDetector
 from src.utils.split_visualization import draw_front_view_cipo
 
 IMG_NORM_MEAN = np.array([123.675, 116.28, 103.53], dtype=np.float32)
@@ -49,6 +48,8 @@ class InferenceWorker(QThread):
         self.depth_engine_path = "models/monocular_depth.engine"
         self.running = False
         self.paused = False
+        # Initialize YOLO detector once with ByteTrack persistence
+        self.detector = OfflineYOLOVehicleDetector()
 
     def run(self):
         self.running = True
@@ -58,7 +59,6 @@ class InferenceWorker(QThread):
         trt_engine = None
         trt_context = None
 
-        detector = None
         depth_estimator = None
         tracker = None
         tracker_manager = LaneTrackerManager(max_missed_frames=10, dist_threshold=2.5)
@@ -103,9 +103,8 @@ class InferenceWorker(QThread):
                 trt_context.set_tensor_address("reg_proposals", int(d_reg_proposals))
                 trt_context.set_tensor_address("anchors", int(d_anchors))
 
-                # 2. Load YOLO Vehicle Detector Engine
-                if os.path.exists(self.yolo_engine_path):
-                    detector = TRTYOLOVehicleDetector(self.yolo_engine_path)
+                # 2. YOLO Vehicle Detector (ByteTrack) already initialized as self.detector
+                detector = self.detector
 
                 # 3. Load Monocular Depth Estimator Engine
                 if os.path.exists(self.depth_engine_path):
