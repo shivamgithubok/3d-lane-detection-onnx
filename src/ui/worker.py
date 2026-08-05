@@ -48,8 +48,8 @@ class InferenceWorker(QThread):
         self.depth_engine_path = "models/monocular_depth.engine"
         self.running = False
         self.paused = False
-        # Initialize YOLO detector once with ByteTrack persistence
-        self.detector = OfflineYOLOVehicleDetector()
+        # Initialize YOLO detector once with ByteTrack persistence using the TensorRT engine
+        self.detector = OfflineYOLOVehicleDetector(model_path="models/yolov8n.engine")
 
     def run(self):
         self.running = True
@@ -215,8 +215,35 @@ class InferenceWorker(QThread):
         finally:
             if cap:
                 cap.release()
+            
+            # Explicitly release CUDA memory buffers & engine contexts before popping context
+            try:
+                if 'trt_context' in locals() and trt_context is not None:
+                    del trt_context
+                if 'trt_engine' in locals() and trt_engine is not None:
+                    del trt_engine
+                if 'stream' in locals() and stream is not None:
+                    del stream
+                if 'd_img' in locals() and d_img is not None:
+                    del d_img
+                if 'd_mask' in locals() and d_mask is not None:
+                    del d_mask
+                if 'd_reg_proposals' in locals() and d_reg_proposals is not None:
+                    del d_reg_proposals
+                if 'd_anchors' in locals() and d_anchors is not None:
+                    del d_anchors
+                if hasattr(self, 'detector') and self.detector is not None:
+                    # Clean up the YOLO model and its associated CUDA states if possible
+                    if hasattr(self.detector, 'model') and self.detector.model is not None:
+                        self.detector.model = None
+            except Exception as ce:
+                print(f"[Worker Cleanup Warning] {ce}")
+
             if cuda_ctx:
-                cuda_ctx.pop()
+                try:
+                    cuda_ctx.pop()
+                except Exception:
+                    pass
 
     def stop(self):
         self.running = False

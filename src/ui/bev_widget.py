@@ -44,6 +44,10 @@ class BEVWidget(QWidget):
         self.left_3d = None
         self.right_3d = None
 
+        # ── Calibration Offsets ──────────────────────────────────────────────
+        self.calib_pitch = 0.0
+        self.calib_h = 1.6
+
         # ── Theme Palette ────────────────────────────────────────────────────
         self.bg_color = QColor(14, 18, 24)
         self.road_color = QColor(24, 29, 38)
@@ -52,6 +56,8 @@ class BEVWidget(QWidget):
 
     def set_calibration(self, pitch_deg, height_m):
         """Updates extrinsics calibration offset."""
+        self.calib_pitch = pitch_deg
+        self.calib_h = height_m
         self.update()
 
     def update_bev_data(self, proposals, processed_objs=None, cipo_status="SAFE", left_3d=None, right_3d=None):
@@ -80,7 +86,8 @@ class BEVWidget(QWidget):
         # Relative coordinate to camera origin
         dx = x
         dy = y + self.cam_dist
-        dz = z - self.cam_h
+        # Apply camera height calibration scaling (scaled relative to base 1.6m height)
+        dz = z - (self.cam_h * (self.calib_h / 1.6))
 
         # 1. Yaw rotation (around Y axis)
         rad_y = np.radians(self.yaw_deg)
@@ -88,8 +95,8 @@ class BEVWidget(QWidget):
         ry = dx * np.sin(rad_y) + dy * np.cos(rad_y)
         rz = dz
 
-        # 2. Pitch rotation (tilt down around X axis)
-        rad_p = np.radians(self.pitch_deg)
+        # 2. Pitch rotation (tilt down around X axis, incorporating pitch calibration)
+        rad_p = np.radians(self.pitch_deg + self.calib_pitch)
         cy = ry * np.cos(rad_p) - rz * np.sin(rad_p)
         cz = ry * np.sin(rad_p) + rz * np.cos(rad_p)
         cx = rx
@@ -259,7 +266,7 @@ class BEVWidget(QWidget):
                         else:
                             lane_color = QColor(0, 255, 180)   # Right adjacent Light Green
 
-                        lane_pen = QPen(lane_color, 2.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                        lane_pen = QPen(lane_color, 2.5, Qt.SolidLine)
                         painter.setPen(lane_pen)
 
                         path = QPainterPath()
@@ -289,33 +296,37 @@ class BEVWidget(QWidget):
                 painter.setPen(Qt.NoPen)
                 painter.drawPolygon(beam_poly)
 
-            # ── 7. Ego Vehicle — Detailed Top-Down SVG Car ──────────────────
-            # Build a smooth top-down car silhouette using many world-space
-            # sample points that get perspective-projected onto the BEV canvas.
-            # Coordinate convention: x=lateral (neg=left), y=forward (positive ahead).
-            # ----- Car body outline (clock-wise, top-down) --------------------
+            # ── 7. Ego Vehicle — Premium Sports Sedan Top-Down Vector ──────────
+            # Body outline (sporty aerodynamics with side mirrors, wide wheel arches)
             car_body_pts = [
-                # Rear bumper (slight taper)
-                (-0.75, -2.20), (-0.40, -2.35),
-                (+0.40, -2.35), (+0.75, -2.20),
-                # Rear quarter-panels
-                (+0.95, -1.90), (+0.98, -1.50),
-                # Mid body (widest)
-                (+0.98, -0.80), (+0.98,  0.00),
-                (+0.98,  0.80),
-                # Front quarter-panels
-                (+0.98,  1.50), (+0.92,  1.95),
-                # Front bumper (narrow)
-                (+0.68,  2.25), (+0.38,  2.38),
-                (+0.00,  2.40),
-                (-0.38,  2.38), (-0.68,  2.25),
-                # Front quarter-panels (left)
-                (-0.92,  1.95), (-0.98,  1.50),
-                # Mid body (left)
-                (-0.98,  0.80), (-0.98,  0.00),
-                (-0.98, -0.80),
-                # Rear quarter-panels (left)
-                (-0.98, -1.50), (-0.95, -1.90),
+                # Front center bumper nose
+                (0.00,  2.45),
+                # Front hood curves (front-right)
+                (0.35,  2.41), (0.62,  2.28), (0.75,  2.05),
+                # Wide Front Wheel Arch
+                (0.88,  1.90), (0.94,  1.60), (0.90,  1.20),
+                # Right Side Mirror
+                (1.12,  1.05), (1.15,  0.88), (0.92,  0.86),
+                # Right Door / Midsection curve
+                (0.92,  0.20), (0.92, -0.60),
+                # Wide Rear Wheel Arch
+                (0.94, -0.80), (0.98, -1.30), (0.92, -1.65),
+                # Rear bumper & diffuser (right)
+                (0.80, -2.15), (0.45, -2.35),
+                # Rear diffuser center (narrow exhaust/vent channel)
+                (0.00, -2.40),
+                # Rear bumper & diffuser (left)
+                (-0.45, -2.35), (-0.80, -2.15),
+                # Wide Rear Wheel Arch (left)
+                (-0.92, -1.65), (-0.98, -1.30), (-0.94, -0.80),
+                # Left Door / Midsection curve
+                (-0.92, -0.60), (-0.92,  0.20),
+                # Left Side Mirror
+                (-0.92,  0.86), (-1.15,  0.88), (-1.12,  1.05),
+                # Wide Front Wheel Arch (left)
+                (-0.90,  1.20), (-0.94,  1.60), (-0.88,  1.90),
+                # Front hood curves (front-left)
+                (-0.75,  2.05), (-0.62,  2.28), (-0.35,  2.41),
             ]
             body_canvas = [self.world_to_canvas_3d(px, py, 0.0, w, h) for px, py in car_body_pts]
             if all(p is not None for p in body_canvas):
@@ -325,64 +336,84 @@ class BEVWidget(QWidget):
                     body_path.lineTo(bp)
                 body_path.closeSubpath()
 
-                # Metallic dark body fill
-                painter.setPen(QPen(QColor(0, 220, 255), 1.8, Qt.SolidLine))
-                painter.setBrush(QBrush(QColor(18, 26, 38)))
+                # Premium metallic titanium-grey body fill with glowing cyan outline
+                painter.setPen(QPen(QColor(0, 220, 255, 220), 1.8, Qt.SolidLine))
+                body_grad = QLinearGradient(body_canvas[0], body_canvas[len(body_canvas)//2])
+                body_grad.setColorAt(0.0, QColor(25, 35, 48))
+                body_grad.setColorAt(0.5, QColor(16, 22, 32))
+                body_grad.setColorAt(1.0, QColor(10, 14, 20))
+                painter.setBrush(QBrush(body_grad))
                 painter.drawPath(body_path)
 
-            # ----- Roof / cabin box -------------------------------------------
+            # ----- Dual Racing / Hood Accent Stripes -----
+            for offset_x in [-0.22, 0.12]:
+                stripe_pts = [
+                    (offset_x, 2.30), (offset_x + 0.10, 2.30),
+                    (offset_x + 0.10, 0.90), (offset_x, 0.90)
+                ]
+                stripe_canvas = [self.world_to_canvas_3d(px, py, 0.0, w, h) for px, py in stripe_pts]
+                if all(p is not None for p in stripe_canvas):
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(QBrush(QColor(0, 220, 255, 60)))  # Subtle glowing racing stripes
+                    painter.drawPolygon(QPolygonF(stripe_canvas))
+
+            # ----- Premium Cabin Greenhouse Glass (windscreens & side panels) -----
             roof_pts = [
-                (-0.78,  0.90), (+0.78,  0.90),
-                (+0.82,  0.20), (+0.82, -0.70),
-                (-0.82, -0.70), (-0.82,  0.20),
+                (-0.68,  0.85), (+0.68,  0.85),
+                (+0.75,  0.20), (+0.75, -0.65),
+                (-0.75, -0.65), (-0.75,  0.20),
             ]
             roof_canvas = [self.world_to_canvas_3d(px, py, 0.0, w, h) for px, py in roof_pts]
             if all(p is not None for p in roof_canvas):
                 roof_poly = QPolygonF(roof_canvas)
-                painter.setPen(QPen(QColor(0, 180, 255, 200), 1.0))
-                painter.setBrush(QBrush(QColor(28, 38, 52)))
+                painter.setPen(QPen(QColor(0, 160, 255, 180), 1.0))
+                painter.setBrush(QBrush(QColor(24, 32, 45)))
                 painter.drawPolygon(roof_poly)
 
-            # ----- Windshield (front glass) -----------------------------------
-            ws_pts = [(-0.68, 0.88), (+0.68, 0.88), (+0.75, 0.18), (-0.75, 0.18)]
+            # ----- Aerodynamic Windshield (Reflective Glass) -----
+            ws_pts = [(-0.60, 0.83), (+0.60, 0.83), (+0.70, 0.25), (-0.70, 0.25)]
             ws_canvas = [self.world_to_canvas_3d(px, py, 0.0, w, h) for px, py in ws_pts]
             if all(p is not None for p in ws_canvas):
-                painter.setPen(QPen(QColor(140, 230, 255, 210), 1.0))
-                painter.setBrush(QBrush(QColor(80, 180, 255, 110)))
+                ws_grad = QLinearGradient(ws_canvas[0], ws_canvas[2])
+                ws_grad.setColorAt(0.0, QColor(0, 180, 255, 120))
+                ws_grad.setColorAt(1.0, QColor(0, 100, 180, 80))
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(ws_grad))
                 painter.drawPolygon(QPolygonF(ws_canvas))
 
-            # ----- Rear window -----------------------------------------------
-            rw_pts = [(-0.65, -0.72), (+0.65, -0.72), (+0.70, -1.40), (-0.70, -1.40)]
+            # ----- Rear glass window -----
+            rw_pts = [(-0.58, -0.67), (+0.58, -0.67), (+0.64, -1.35), (-0.64, -1.35)]
             rw_canvas = [self.world_to_canvas_3d(px, py, 0.0, w, h) for px, py in rw_pts]
             if all(p is not None for p in rw_canvas):
-                painter.setPen(QPen(QColor(140, 230, 255, 160), 1.0))
-                painter.setBrush(QBrush(QColor(60, 150, 220, 80)))
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(QColor(30, 80, 140, 100)))
                 painter.drawPolygon(QPolygonF(rw_canvas))
 
-            # ----- Wheels (4 corners) ----------------------------------------
+            # ----- Wheels with performance brake calipers -----
             wheel_defs = [
-                [(-1.05, 1.65), (-1.05, 1.10), (-0.85, 1.10), (-0.85, 1.65)],  # FL
-                [(+0.85, 1.65), (+0.85, 1.10), (+1.05, 1.10), (+1.05, 1.65)],  # FR
-                [(-1.05,-1.05), (-1.05,-1.60), (-0.85,-1.60), (-0.85,-1.05)],  # RL
-                [(+0.85,-1.05), (+0.85,-1.60), (+1.05,-1.60), (+1.05,-1.05)],  # RR
+                [(-0.96, 1.60), (-0.96, 1.10), (-0.80, 1.10), (-0.80, 1.60)],  # FL
+                [(+0.80, 1.60), (+0.80, 1.10), (+0.96, 1.10), (+0.96, 1.60)],  # FR
+                [(-0.96,-1.00), (-0.96,-1.50), (-0.80,-1.50), (-0.80,-1.00)],  # RL
+                [(+0.80,-1.00), (+0.80,-1.50), (+0.96,-1.50), (+0.96,-1.00)],  # RR
             ]
             for wdef in wheel_defs:
                 wc = [self.world_to_canvas_3d(px, py, 0.0, w, h) for px, py in wdef]
                 if all(p is not None for p in wc):
-                    painter.setPen(QPen(QColor(60, 70, 80), 1.0))
-                    painter.setBrush(QBrush(QColor(40, 50, 60)))
+                    painter.setPen(QPen(QColor(40, 48, 56), 1.0))
+                    painter.setBrush(QBrush(QColor(22, 26, 30)))
                     painter.drawPolygon(QPolygonF(wc))
-                    # Tyre highlight ring
+
+                    # Inner silver alloy spokes/ring details
                     cx_w = float(np.mean([px for px, py in wdef]))
                     cy_w = float(np.mean([py for px, py in wdef]))
                     center = self.world_to_canvas_3d(cx_w, cy_w, 0.0, w, h)
                     if center is not None:
-                        painter.setPen(QPen(QColor(100, 110, 120), 1.0))
+                        painter.setPen(QPen(QColor(150, 160, 175), 1.2))
                         painter.setBrush(Qt.NoBrush)
-                        painter.drawEllipse(center, 3.5, 3.5)
+                        painter.drawEllipse(center, 3.8, 3.8)
 
-            # ----- LED Headlamps (front) -------------------------------------
-            for hx, hy in [(-0.68, 2.34), (+0.68, 2.34)]:
+            # ----- Triple-beam LED Projection Headlamps -----
+            for hx, hy in [(-0.58, 2.38), (+0.58, 2.38)]:
                 pt = self.world_to_canvas_3d(hx, hy, 0.0, w, h)
                 if pt is not None:
                     # Glow halo

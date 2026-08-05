@@ -14,7 +14,7 @@ class OfflineYOLOVehicleDetector:
         if os.path.exists(model_path):
             try:
                 from ultralytics import YOLO
-                self.model = YOLO(model_path)
+                self.model = YOLO(model_path, task='detect')
                 print(f"[ObjectDetector] Successfully loaded YOLO ByteTrack model from {model_path}")
             except Exception as e:
                 print(f"[ObjectDetector] Ultralytics loading failed: {e}")
@@ -23,7 +23,7 @@ class OfflineYOLOVehicleDetector:
         if self.model is not None:
             try:
                 # ByteTrack multi-object tracking for Cars (class 2) and Trucks (class 7)
-                results = self.model.track(frame, persist=True, tracker="bytetrack.yaml", classes=[2, 7], verbose=False, conf=self.conf_thresh)[0]
+                results = self.model.track(frame, persist=True, imgsz=(384, 480), tracker="bytetrack.yaml", classes=[2, 7], verbose=False, conf=self.conf_thresh)[0]
                 detections = []
                 for box in results.boxes:
                     cls_id = int(box.cls[0])
