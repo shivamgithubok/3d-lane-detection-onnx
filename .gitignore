@@ -4,3 +4,6 @@ videos
 *.pth.zip
 *.mp4
 output
+onnxruntime
+output/*.jpg
+output/*.png

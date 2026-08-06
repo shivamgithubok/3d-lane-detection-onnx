@@ -94,7 +94,7 @@ def run_video_inference(video_path=DEFAULT_VIDEO_PATH, show_gui=True, save_outpu
 
     if show_gui:
         try:
-            cv2.namedWindow("3D Lane Detection - GPU TensorRT", cv2.WINDOW_NORMAL)
+            cv2.namedWindow("Front View", cv2.WINDOW_NORMAL)
             cv2.namedWindow("Bird's Eye View (BEV)", cv2.WINDOW_NORMAL)
         except Exception:
             show_gui = False
@@ -148,7 +148,7 @@ def run_video_inference(video_path=DEFAULT_VIDEO_PATH, show_gui=True, save_outpu
         if show_gui:
             try:
                 cv2.imshow("Front View", display_frame)
-                cv2.imshow("BEV (3D real-world lane coordinates)", bev)
+                cv2.imshow("Bird's Eye View (BEV)", bev)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
             except Exception:

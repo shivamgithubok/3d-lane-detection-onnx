@@ -55,13 +55,22 @@ def _projective_transformation(P, x, y, z):
     return u, v
 
 def decode_lane_pixels(proposal, P_matrix):
-    lane_xs = proposal[5:5 + ANCHOR_LEN]
-    lane_zs = proposal[5 + ANCHOR_LEN:5 + 2 * ANCHOR_LEN]
-    lane_vis = proposal[5 + 2 * ANCHOR_LEN:5 + 3 * ANCHOR_LEN] > 0
-    if lane_vis.sum() < 2:
+    if isinstance(proposal, np.ndarray) and proposal.ndim == 2 and proposal.shape[1] == 3:
+        xs = proposal[:, 0].astype(np.float64)
+        ys = proposal[:, 1].astype(np.float64)
+        zs = proposal[:, 2].astype(np.float64)
+    else:
+        lane_xs = proposal[5:5 + ANCHOR_LEN]
+        lane_zs = proposal[5 + ANCHOR_LEN:5 + 2 * ANCHOR_LEN]
+        lane_vis = proposal[5 + 2 * ANCHOR_LEN:5 + 3 * ANCHOR_LEN] > 0
+        if lane_vis.sum() < 2:
+            return []
+        xs = lane_xs[lane_vis].astype(np.float64)
+        ys = ANCHOR_Y_STEPS[lane_vis]
+        zs = lane_zs[lane_vis].astype(np.float64)
+
+    if len(xs) < 2:
         return []
-    xs = lane_xs[lane_vis].astype(np.float64)
-    ys = ANCHOR_Y_STEPS[lane_vis]
-    zs = lane_zs[lane_vis].astype(np.float64)
+
     u, v = _projective_transformation(P_matrix, xs, ys, zs)
     return list(zip(u, v))
