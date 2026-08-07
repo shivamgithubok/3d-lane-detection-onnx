@@ -14,8 +14,9 @@ class CalibrationPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.pitch_deg = 0.0
-        self.height_m = 1.6
+        # Tuned defaults matching the preferred BEV look
+        self.pitch_deg = -7.0
+        self.height_m = 1.0
         self.roll_deg = 0.0
         self.yaw_deg = 0.0
 
@@ -119,6 +120,6 @@ class CalibrationPanel(QWidget):
         self.calibration_changed.emit(self.pitch_deg, self.height_m)
 
     def reset_defaults(self):
-        self.slider_pitch.setValue(0)
-        self.slider_height.setValue(16)
+        self.slider_pitch.setValue(-70)   # -7.0°
+        self.slider_height.setValue(10)   # 1.0 m
         self.on_slider_changed()
