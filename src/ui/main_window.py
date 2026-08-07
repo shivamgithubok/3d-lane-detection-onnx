@@ -175,6 +175,14 @@ class ADASMainWindow(QMainWindow):
         self.btn_road_style.clicked.connect(self.toggle_road_style)
         bev_ctrl_layout.addWidget(self.btn_road_style)
 
+        self.btn_lane_lines = QPushButton("〰 3D Lanes: ON")
+        self.btn_lane_lines.setObjectName("ctrl_btn")
+        self.btn_lane_lines.setCheckable(True)
+        self.btn_lane_lines.setChecked(True)
+        self.btn_lane_lines.setToolTip("Show / hide Anchor3D detected lane lines on BEV")
+        self.btn_lane_lines.clicked.connect(self.toggle_lane_lines)
+        bev_ctrl_layout.addWidget(self.btn_lane_lines)
+
         bev_ctrl_layout.addStretch()
         right_layout.addLayout(bev_ctrl_layout)
 
@@ -242,6 +250,11 @@ class ADASMainWindow(QMainWindow):
     def toggle_road_style(self):
         cinematic = self.bev_widget.toggle_cinematic_road()
         self.btn_road_style.setText("🛣 Road: Cinematic" if cinematic else "🛣 Road: Grid")
+
+    def toggle_lane_lines(self):
+        show = self.bev_widget.toggle_lane_lines()
+        self.btn_lane_lines.setChecked(show)
+        self.btn_lane_lines.setText("〰 3D Lanes: ON" if show else "〰 3D Lanes: OFF")
 
     def open_video_file(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "Open MP4 Video File", "", "Video Files (*.mp4 *.avi *.mkv)")

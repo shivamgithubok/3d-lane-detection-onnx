@@ -11,11 +11,11 @@ Renders dynamic 3D perspective Bird's Eye View (BEV) map with:
 import os
 
 import numpy as np
-from PySide6.QtCore import Qt, QPointF
+from PySide6.QtCore import Qt, QPointF, QElapsedTimer
 from PySide6.QtWidgets import QWidget
 from PySide6.QtGui import (
     QPainter, QColor, QPen, QBrush, QPolygonF, QFont, QPainterPath,
-    QLinearGradient, QRadialGradient, QTransform
+    QLinearGradient, QRadialGradient, QTransform, QPixmap
 )
 
 from src.inference.postprocess import ANCHOR_Y_STEPS
@@ -121,12 +121,62 @@ class BEVWidget(QWidget):
 
         # Cinematic highway look (reference chase-cam road) — default ON
         self.cinematic_road = True
+        self.show_lane_lines = True  # Anchor3D detected lane overlays only (UI toggle)
+
+
+        # Running dashed-lane scroll — advances on detection frames only (no extra timer repaints)
+        self._dash_phase = 0.0
+        self._dash_len = 4.5
+        self._dash_gap = 5.5
+        self._dash_speed_mps = 15.0
+        self._dash_clock = QElapsedTimer()
+        self._dash_clock.start()
+        self._dash_last_ms = 0
+
+        # Cached static cinematic road (asphalt + solid edges) — rebuilt on view change
+        self._road_cache = None  # QPixmap | None
+        self._road_cache_key = None
 
     def toggle_cinematic_road(self):
         """Switch between cinematic highway and classic grid road."""
         self.cinematic_road = not self.cinematic_road
+        self._invalidate_road_cache()
         self.update()
         return self.cinematic_road
+
+    def toggle_lane_lines(self):
+        """Show / hide Anchor3D detection lane lines on the BEV canvas."""
+        self.show_lane_lines = not self.show_lane_lines
+        # Detection overlay only — do not rebuild cinematic road paint cache
+        self.update()
+        return self.show_lane_lines
+
+    def _invalidate_road_cache(self):
+        self._road_cache = None
+        self._road_cache_key = None
+
+    def _road_cache_signature(self, w, h):
+        return (
+            int(w), int(h),
+            round(self.pitch_deg, 2), round(self.yaw_deg, 2),
+            round(self.zoom_factor, 3),
+            round(self.pan_offset.x(), 1), round(self.pan_offset.y(), 1),
+            round(self.calib_pitch, 2), round(self.calib_h, 2),
+            bool(self.cinematic_road),
+        )
+
+    def _advance_dash_phase(self, has_detection: bool):
+        """Scroll dashes with wall-clock dt on each detection frame (no extra paint timer)."""
+        if not self.cinematic_road or not has_detection:
+            return
+        now = self._dash_clock.elapsed()
+        if self._dash_last_ms <= 0:
+            self._dash_last_ms = now
+            return
+        dt = min(0.12, max(0.0, (now - self._dash_last_ms) / 1000.0))
+        self._dash_last_ms = now
+        period = self._dash_len + self._dash_gap
+        self._dash_phase = (self._dash_phase + self._dash_speed_mps * dt) % period
 
     def _bev_visible(self, obj) -> bool:
         """Distance + lane filters: ego/2nd lane only, within BEV_MAX_DIST_M."""
@@ -310,6 +360,7 @@ class BEVWidget(QWidget):
         """Updates extrinsics calibration offset."""
         self.calib_pitch = pitch_deg
         self.calib_h = height_m
+        self._invalidate_road_cache()
         self.update()
 
     def update_bev_data(self, proposals, processed_objs=None, cipo_status="SAFE", left_3d=None, right_3d=None):
@@ -320,6 +371,9 @@ class BEVWidget(QWidget):
         self.cipo_status = cipo_status
         self.left_3d = left_3d
         self.right_3d = right_3d
+
+        has_detection = bool(self.proposals) or bool(self.processed_objs)
+        self._advance_dash_phase(has_detection)
         self.update()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -378,9 +432,11 @@ class BEVWidget(QWidget):
         if self.is_rotating:
             self.yaw_deg = max(-85.0, min(85.0, self.yaw_deg + delta.x() * 0.35))
             self.pitch_deg = max(5.0, min(75.0, self.pitch_deg - delta.y() * 0.35))
+            self._invalidate_road_cache()
             self.update()
         elif self.is_panning:
             self.pan_offset += delta
+            self._invalidate_road_cache()
             self.update()
 
     def mouseReleaseEvent(self, event):
@@ -395,6 +451,7 @@ class BEVWidget(QWidget):
         new_zoom = self.zoom_factor * factor
         if 0.4 <= new_zoom <= 4.5:
             self.zoom_factor = new_zoom
+            self._invalidate_road_cache()
             self.update()
 
     def reset_view(self):
@@ -403,6 +460,7 @@ class BEVWidget(QWidget):
         self.yaw_deg = DEFAULT_VIEW_YAW
         self.zoom_factor = DEFAULT_ZOOM
         self.pan_offset = QPointF(0, 0)
+        self._invalidate_road_cache()
         self.update()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -424,10 +482,12 @@ class BEVWidget(QWidget):
         path.moveTo(canvas_pts[0])
         for p in canvas_pts[1:]:
             path.lineTo(p)
-        glow = QColor(core.red(), core.green(), core.blue(), glow_a)
         painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(glow, glow_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.drawPath(path)
+        # Fast path: single stroke (glow pass optional for thick solids only)
+        if glow_w > core_w + 1.5 and glow_a > 0:
+            glow = QColor(core.red(), core.green(), core.blue(), glow_a)
+            painter.setPen(QPen(glow, glow_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawPath(path)
         painter.setPen(QPen(core, core_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         painter.drawPath(path)
 
@@ -435,34 +495,46 @@ class BEVWidget(QWidget):
         pts = self._canvas_polyline([(x0, y0), (x1, y1)], w, h)
         self._stroke_glow_path(painter, pts, core, core_w=core_w, glow_w=glow_w)
 
-    def _draw_dashed_lane_x(self, painter, x, y0, y1, w, h, core, dash=3.2, gap=4.0, core_w=2.2):
-        y = float(y0)
+    def _draw_dashed_lane_x(
+        self, painter, x, y0, y1, w, h, core,
+        dash=3.2, gap=4.0, core_w=2.2, phase=0.0,
+    ):
+        """
+        Draw a dashed lane with optional scroll phase (meters).
+        Increasing phase moves dashes toward the ego (forward-motion feel).
+        Single-stroke only for FPS.
+        """
+        period = float(dash + gap)
+        if period < 1e-3:
+            return
+        y = float(y0) - (float(phase) % period) - period
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(core, core_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         while y < y1:
-            y_end = min(y + dash, y1)
-            self._draw_world_segment(painter, x, y, x, y_end, w, h, core, core_w=core_w, glow_w=6.0)
-            y = y_end + gap
+            seg0 = max(y, float(y0))
+            seg1 = min(y + dash, float(y1))
+            if seg1 > seg0 + 0.08:
+                pts = self._canvas_polyline([(x, seg0), (x, seg1)], w, h)
+                if len(pts) >= 2:
+                    painter.drawLine(pts[0], pts[1])
+            y += period
 
     def _draw_car_shadow(self, painter, x, y, hw, hl, w, h):
-        """Soft ground blob under a car for cinematic depth."""
-        shadow_pts = [
-            self.world_to_canvas_3d(x - hw * 0.95, y - hl * 0.35, 0.01, w, h),
-            self.world_to_canvas_3d(x + hw * 0.95, y - hl * 0.35, 0.01, w, h),
-            self.world_to_canvas_3d(x + hw * 0.75, y + hl * 0.45, 0.01, w, h),
-            self.world_to_canvas_3d(x - hw * 0.75, y + hl * 0.45, 0.01, w, h),
-        ]
-        if not all(p is not None for p in shadow_pts):
+        """Cheap ground oval under a car (no radial polygon)."""
+        p = self.world_to_canvas_3d(x, y, 0.0, w, h)
+        if p is None:
             return
-        poly = QPolygonF(shadow_pts)
-        # Approximate center for radial fade
-        cx = sum(p.x() for p in shadow_pts) / 4.0
-        cy = sum(p.y() for p in shadow_pts) / 4.0
-        grad = QRadialGradient(QPointF(cx, cy), max(18.0, abs(shadow_pts[1].x() - shadow_pts[0].x()) * 0.55))
-        grad.setColorAt(0.0, QColor(0, 0, 0, 110))
-        grad.setColorAt(0.65, QColor(0, 0, 0, 45))
-        grad.setColorAt(1.0, QColor(0, 0, 0, 0))
+        # Scale shadow with perspective via nearby lateral points
+        pl = self.world_to_canvas_3d(x - hw, y, 0.0, w, h)
+        pr = self.world_to_canvas_3d(x + hw, y, 0.0, w, h)
+        if pl is None or pr is None:
+            rw, rh = 18.0, 8.0
+        else:
+            rw = max(10.0, abs(pr.x() - pl.x()) * 0.55)
+            rh = max(5.0, rw * 0.35)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(grad))
-        painter.drawPolygon(poly)
+        painter.setBrush(QBrush(QColor(0, 0, 0, 90)))
+        painter.drawEllipse(p, rw, rh)
 
     def _draw_classic_road(self, painter, w, h):
         """Original grid telemetry road."""
@@ -508,11 +580,8 @@ class BEVWidget(QWidget):
                 painter.setPen(line_pen)
                 painter.drawPath(path)
 
-    def _draw_cinematic_road(self, painter, w, h):
-        """
-        Chase-cam highway: dark glossy asphalt, shoulder grid, glowing lane paint.
-        """
-        # Shoulder / void plane (wider than road) with faint technical grid
+    def _paint_cinematic_static(self, painter, w, h):
+        """Static asphalt + solid edges (no animated dashes) — used for cache bake."""
         shoulder = [(-14.0, -2.0), (14.0, -2.0), (14.0, 85.0), (-14.0, 85.0)]
         sh_pts = [self.world_to_canvas_3d(x, y, 0.0, w, h) for x, y in shoulder]
         if all(p is not None for p in sh_pts):
@@ -520,86 +589,74 @@ class BEVWidget(QWidget):
             painter.setBrush(QBrush(QColor(10, 12, 16)))
             painter.drawPolygon(QPolygonF(sh_pts))
 
-        shoulder_grid = QPen(QColor(28, 34, 44, 90), 1, Qt.DotLine)
-        painter.setPen(shoulder_grid)
-        for x_m in np.linspace(-13.0, 13.0, 14):
-            if abs(x_m) < 5.8:
-                continue
+        # Sparse shoulder grid (few lines only)
+        painter.setPen(QPen(QColor(28, 34, 44, 80), 1, Qt.DotLine))
+        for x_m in (-12.0, -9.0, 9.0, 12.0):
             pts = self._canvas_polyline([(x_m, 0.0), (x_m, 80.0)], w, h)
             if len(pts) > 1:
-                path = QPainterPath()
-                path.moveTo(pts[0])
-                for p in pts[1:]:
-                    path.lineTo(p)
-                painter.drawPath(path)
-        for y_m in range(0, 85, 10):
-            pts = self._canvas_polyline([(-14.0, y_m), (-5.8, y_m)], w, h)
-            if len(pts) > 1:
-                path = QPainterPath(); path.moveTo(pts[0])
-                for p in pts[1:]:
-                    path.lineTo(p)
-                painter.drawPath(path)
-            pts = self._canvas_polyline([(5.8, y_m), (14.0, y_m)], w, h)
-            if len(pts) > 1:
-                path = QPainterPath(); path.moveTo(pts[0])
-                for p in pts[1:]:
-                    path.lineTo(p)
-                painter.drawPath(path)
+                painter.drawLine(pts[0], pts[-1])
 
-        # Main asphalt ribbon
         road_l, road_r = -5.6, 5.6
         asphalt = [(road_l, -1.0), (road_r, -1.0), (road_r, 82.0), (road_l, 82.0)]
         asp_pts = [self.world_to_canvas_3d(x, y, 0.0, w, h) for x, y in asphalt]
         if all(p is not None for p in asp_pts):
-            # Base dark asphalt
             painter.setPen(Qt.NoPen)
             painter.setBrush(QBrush(QColor(16, 18, 22)))
             painter.drawPolygon(QPolygonF(asp_pts))
-
-            # Center gloss strip (wet-road cue)
-            gloss = [(-1.4, 0.0), (1.4, 0.0), (0.9, 70.0), (-0.9, 70.0)]
+            mid_near = self.world_to_canvas_3d(0.0, 2.0, 0.0, w, h)
+            mid_far = self.world_to_canvas_3d(0.0, 55.0, 0.0, w, h)
+            gloss = [(-1.2, 0.0), (1.2, 0.0), (0.8, 70.0), (-0.8, 70.0)]
             g_pts = [self.world_to_canvas_3d(x, y, 0.0, w, h) for x, y in gloss]
-            if all(p is not None for p in g_pts):
-                mid_near = self.world_to_canvas_3d(0.0, 2.0, 0.0, w, h)
-                mid_far = self.world_to_canvas_3d(0.0, 55.0, 0.0, w, h)
-                if mid_near is not None and mid_far is not None:
-                    g = QLinearGradient(mid_near, mid_far)
-                    g.setColorAt(0.0, QColor(48, 54, 64, 70))
-                    g.setColorAt(0.45, QColor(32, 36, 44, 35))
-                    g.setColorAt(1.0, QColor(20, 22, 28, 0))
-                    painter.setBrush(QBrush(g))
-                    painter.drawPolygon(QPolygonF(g_pts))
+            if mid_near is not None and mid_far is not None and all(p is not None for p in g_pts):
+                g = QLinearGradient(mid_near, mid_far)
+                g.setColorAt(0.0, QColor(48, 54, 64, 55))
+                g.setColorAt(1.0, QColor(20, 22, 28, 0))
+                painter.setBrush(QBrush(g))
+                painter.drawPolygon(QPolygonF(g_pts))
 
-            # Soft edge vignette on asphalt
-            for side_x, inward in ((road_l, 0.55), (road_r, -0.55)):
-                edge = [
-                    (side_x, -1.0), (side_x + inward, -1.0),
-                    (side_x + inward * 0.6, 80.0), (side_x, 80.0),
-                ]
-                e_pts = [self.world_to_canvas_3d(x, y, 0.0, w, h) for x, y in edge]
-                if all(p is not None for p in e_pts):
-                    painter.setBrush(QBrush(QColor(0, 0, 0, 55)))
-                    painter.drawPolygon(QPolygonF(e_pts))
-
-        # Glowing lane paint (solid shoulders + dashed separators)
         white = QColor(235, 240, 255)
-        self._draw_world_segment(painter, -5.35, 0.5, -5.35, 78.0, w, h, white, core_w=2.8, glow_w=9.0)
-        self._draw_world_segment(painter,  5.35, 0.5,  5.35, 78.0, w, h, white, core_w=2.8, glow_w=9.0)
-        self._draw_dashed_lane_x(painter, -1.85, 2.0, 78.0, w, h, white, dash=3.5, gap=4.5, core_w=2.2)
-        self._draw_dashed_lane_x(painter,  1.85, 2.0, 78.0, w, h, white, dash=3.5, gap=4.5, core_w=2.2)
+        self._draw_world_segment(painter, -5.35, 0.5, -5.35, 78.0, w, h, white, core_w=2.6, glow_w=6.0)
+        self._draw_world_segment(painter,  5.35, 0.5,  5.35, 78.0, w, h, white, core_w=2.6, glow_w=6.0)
 
-        # Subtle distance ticks (less telemetry, more HUD)
         painter.setFont(QFont("Inter", 7))
+        painter.setPen(QPen(QColor(160, 175, 195, 110)))
         for y_m in (20, 40, 60):
             pt = self.world_to_canvas_3d(0.0, float(y_m), 0.0, w, h)
-            if pt is None:
-                continue
-            painter.setPen(QPen(QColor(160, 175, 195, 120)))
-            painter.drawText(int(pt.x() + 8), int(pt.y() - 2), f"{y_m}m")
+            if pt is not None:
+                painter.drawText(int(pt.x() + 8), int(pt.y() - 2), f"{y_m}m")
+
+    def _draw_cinematic_road(self, painter, w, h):
+        """
+        Chase-cam highway with cached static layer + live scrolling dashes.
+        """
+        key = self._road_cache_signature(w, h)
+        if self._road_cache is None or self._road_cache_key != key:
+            cache = QPixmap(w, h)
+            cache.fill(Qt.transparent)
+            cp = QPainter(cache)
+            cp.setRenderHint(QPainter.Antialiasing, True)
+            self._paint_cinematic_static(cp, w, h)
+            cp.end()
+            self._road_cache = cache
+            self._road_cache_key = key
+
+        painter.drawPixmap(0, 0, self._road_cache)
+
+        # Decorative dashed separators always on (not tied to Anchor3D toggle)
+        white = QColor(235, 240, 255)
+        phase = self._dash_phase
+        self._draw_dashed_lane_x(
+            painter, -1.85, 2.0, 78.0, w, h, white,
+            dash=self._dash_len, gap=self._dash_gap, core_w=2.0, phase=phase,
+        )
+        self._draw_dashed_lane_x(
+            painter, 1.85, 2.0, 78.0, w, h, white,
+            dash=self._dash_len, gap=self._dash_gap, core_w=2.0, phase=phase,
+        )
 
     def _draw_detected_lanes(self, painter, w, h):
-        """Overlay model lane proposals (style depends on road mode)."""
-        if not self.proposals:
+        """Overlay Anchor3D model lane proposals (gated by show_lane_lines)."""
+        if not self.show_lane_lines or not self.proposals:
             return
         for lane in self.proposals:
             xs, ys, zs, vis = parse_lane_components(lane)
@@ -615,9 +672,9 @@ class BEVWidget(QWidget):
                 continue
 
             if self.cinematic_road:
-                # Soft cyan detection glow on top of white paint
-                core = QColor(120, 220, 255) if abs(mean_x) < 2.2 else QColor(210, 220, 235)
-                self._stroke_glow_path(painter, valid_pts, core, core_w=1.8, glow_w=5.5, glow_a=40)
+                # Soft cyan detection overlay — single stroke for FPS
+                core = QColor(120, 220, 255, 180) if abs(mean_x) < 2.2 else QColor(210, 220, 235, 140)
+                self._stroke_glow_path(painter, valid_pts, core, core_w=1.6, glow_w=0.0, glow_a=0)
             else:
                 if abs(mean_x) < 2.0:
                     lane_color = QColor(0, 220, 255)
