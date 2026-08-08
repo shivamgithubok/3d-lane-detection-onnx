@@ -124,6 +124,9 @@ class InferenceWorker(QThread):
             self.status_message.emit(f"Playing Video: {os.path.basename(self.video_path)}")
 
         fps_history = []
+        frame_i = 0
+        last_depth_map = None
+        DEPTH_EVERY_N = 2  # reuse depth on alternate frames → big FPS win on Orin
 
         try:
             while self.running:
@@ -163,9 +166,10 @@ class InferenceWorker(QThread):
 
                     # Step B: YOLO Vehicle Detection & Depth Map Estimation
                     raw_detections = detector.detect(frame) if detector else []
-                    depth_map = None
-                    if depth_estimator:
+                    depth_map = last_depth_map
+                    if depth_estimator and (frame_i % DEPTH_EVERY_N == 0 or last_depth_map is None):
                         depth_map, _, _ = depth_estimator.estimate_depth_map(frame)
+                        last_depth_map = depth_map
 
                     # Step C: CIPO Tracker & 3D In-Path Association
                     h_frame, w_frame = frame.shape[:2]
@@ -195,8 +199,17 @@ class InferenceWorker(QThread):
                         frame, proposals, processed_objs, cipo_obj, DEFAULT_P_MATRIX, show_drivable=True
                     )
                     frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+                    # Downscale for UI transfer/paint (keeps HUD readable, cuts Qt cost)
+                    max_w = 960
+                    if frame_rgb.shape[1] > max_w:
+                        scale = max_w / float(frame_rgb.shape[1])
+                        frame_rgb = cv2.resize(
+                            frame_rgb,
+                            (max_w, int(frame_rgb.shape[0] * scale)),
+                            interpolation=cv2.INTER_AREA,
+                        )
                 else:
-                    frame_rgb = np.zeros((720, 1280, 3), dtype=np.uint8)
+                    frame_rgb = np.zeros((405, 720, 3), dtype=np.uint8)
 
                 t1 = time.perf_counter()
                 latency_ms = (t1 - t0) * 1000.0
@@ -209,7 +222,9 @@ class InferenceWorker(QThread):
                     frame_rgb, proposals, processed_objs, cipo_obj, cipo_status, left_3d, right_3d, avg_fps, latency_ms
                 )
 
-                sleep_ms = max(1, int(33 - latency_ms))
+                frame_i += 1
+                # Target ~15 FPS pacing when pipeline is fast enough
+                sleep_ms = max(1, int(66 - latency_ms))
                 self.msleep(sleep_ms)
 
         finally:

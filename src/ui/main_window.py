@@ -168,12 +168,29 @@ class ADASMainWindow(QMainWindow):
         btn_reset_bev.setObjectName("ctrl_btn")
         btn_reset_bev.clicked.connect(self.bev_widget.reset_view)
         bev_ctrl_layout.addWidget(btn_reset_bev)
+
+        self.btn_road_style = QPushButton("🛣 Road: Cinematic")
+        self.btn_road_style.setObjectName("ctrl_btn")
+        self.btn_road_style.setToolTip("Toggle cinematic highway vs classic grid road")
+        self.btn_road_style.clicked.connect(self.toggle_road_style)
+        bev_ctrl_layout.addWidget(self.btn_road_style)
+
+        self.btn_lane_lines = QPushButton("〰 3D Lanes: ON")
+        self.btn_lane_lines.setObjectName("ctrl_btn")
+        self.btn_lane_lines.setCheckable(True)
+        self.btn_lane_lines.setChecked(True)
+        self.btn_lane_lines.setToolTip("Show / hide Anchor3D detected lane lines on BEV")
+        self.btn_lane_lines.clicked.connect(self.toggle_lane_lines)
+        bev_ctrl_layout.addWidget(self.btn_lane_lines)
+
         bev_ctrl_layout.addStretch()
         right_layout.addLayout(bev_ctrl_layout)
 
-        # Extrinsics Calibration Sliders
+        # Extrinsics Calibration Sliders (defaults: pitch -7°, height 1.0 m)
         self.calib_panel = CalibrationPanel()
         self.calib_panel.calibration_changed.connect(self.bev_widget.set_calibration)
+        # Apply preferred extrinsics immediately so BEV matches the tuner on launch
+        self.bev_widget.set_calibration(self.calib_panel.pitch_deg, self.calib_panel.height_m)
         right_layout.addWidget(self.calib_panel)
 
         splitter.addWidget(right_container)
@@ -229,6 +246,15 @@ class ADASMainWindow(QMainWindow):
             self.btn_play.setText("▶ Play")
         else:
             self.btn_play.setText("⏸ Pause")
+
+    def toggle_road_style(self):
+        cinematic = self.bev_widget.toggle_cinematic_road()
+        self.btn_road_style.setText("🛣 Road: Cinematic" if cinematic else "🛣 Road: Grid")
+
+    def toggle_lane_lines(self):
+        show = self.bev_widget.toggle_lane_lines()
+        self.btn_lane_lines.setChecked(show)
+        self.btn_lane_lines.setText("〰 3D Lanes: ON" if show else "〰 3D Lanes: OFF")
 
     def open_video_file(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "Open MP4 Video File", "", "Video Files (*.mp4 *.avi *.mkv)")

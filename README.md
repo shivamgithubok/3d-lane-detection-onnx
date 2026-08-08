@@ -1,145 +1,110 @@
-# 🛣️ Anchor3DLane Jetson Inference & TensorRT GPU Acceleration + YOLO ByteTrack CIPO Pipeline
+# Anchor3DLane Jetson Inference & TensorRT + CIPO BEV ADAS
 
-This repository provides real-time 3D lane detection and **CIPO (Closest In-Path Object)** collision alert utilities optimized for **NVIDIA Jetson Orin** edge GPUs. It features high-speed TensorRT `.engine` GPU acceleration, 3D-to-2D perspective projection onto front-view camera frames, real-world Bird's Eye View (BEV) mapping in meters, **YOLO ByteTrack multi-object tracking (Cars & Trucks)**, and real-time CIPO alert telemetry.
-
----
-
-## 🎬 Live Pipeline Demo Video
-
-[![CIPO Pipeline Demo Video](output/example_3_cipo_bytetrack_fixed.mp4)](file:///home/elevatics/Projects/3d-lane-detection-onnx/output/example_3_cipo_bytetrack_fixed.mp4)
-
-> **Demo Output Video:** [output/example_3_cipo_bytetrack_fixed.mp4](file:///home/elevatics/Projects/3d-lane-detection-onnx/output/example_3_cipo_bytetrack_fixed.mp4)
-> Features real-time 3-panel split view: **Front View** (3D lane lines + ByteTrack bounding boxes + CIPO alert header), **Bird's Eye View (BEV)** (real-world 3D lane grid & vehicle positions in meters), and **Telemetry HUD** (live FPS & CIPO range).
+Real-time **3D lane detection** and **CIPO (Closest In-Path Object)** visualization for **NVIDIA Jetson Orin**, with TensorRT engines, YOLO ByteTrack vehicle tracking, monocular depth, and a PySide6 front-camera + rotatable BEV dashboard.
 
 ---
 
-## 📊 Performance Benchmark Results (NVIDIA Jetson Orin)
-
-| Model Execution Mode | Platform / Engine | Latency (ms) | Inference Speed | Speedup |
-| :--- | :--- | :--- | :--- | :--- |
-| **CPU ONNX Inference** | ARM Cortex CPU | ~1,665 ms | ~0.6 FPS | Baseline |
-| **3D Lane Model Only (TensorRT FP16)** | **NVIDIA Orin GPU** | **~9.6 ms** | **103.7 FPS (Peak)** / **74.7 FPS (Sustained)** | **~125x Faster** 🚀 |
-| **End-to-End Real-Time Video (3D Lane Only)** | **NVIDIA Orin GPU** | **~28.5 ms** | **~35.2 FPS (Live Stream)** | Real-Time Real-World |
-| **3D Lane + YOLO ByteTrack CIPO Pipeline** | **NVIDIA Orin GPU** | **~30.1 ms** | **~33.1 FPS (Live Stream)** | Full CIPO ADAS System |
-
----
-
-## 📁 Repository Directory Structure
-
-```text
-3d-lane-detection-onnx/
-├── data/
-│   └── images/                     # Input images and sample MP4 videos
-│       ├── example.jpg
-│       ├── example_1.mp4
-│       ├── example_2.mp4
-│       └── example_3.mp4
-├── models/
-│   ├── anchor3dlane_raw.onnx        # ONNX Model weights file (Git LFS)
-│   ├── anchor3dlane_raw.engine      # Compiled TensorRT FP16 GPU Engine
-│   └── yolov8n.pt                   # YOLO PyTorch model weights for vehicle tracking
-├── output/                         # Generated annotated images & video outputs
-│   ├── example_3_cipo_bytetrack_fixed.mp4 # CIPO Pipeline output video
-│   ├── example_2_annotated.mp4
-│   └── tensorrt_annotated.jpg
-├── scripts/
-│   ├── infer_cipo_pipeline.py      # Real-Time 3D Lane + YOLO ByteTrack CIPO Pipeline
-│   ├── infer_video_tensorrt.py     # Real-time TensorRT video stream + live FPS & BEV map
-│   ├── infer_tensorrt.py           # TensorRT GPU inference on single image
-│   ├── benchmark_fps.py            # Latency and FPS benchmarking script
-│   ├── tune_calibration.py         # Camera extrinsic/intrinsic calibration tuner
-│   └── extract_frame.py            # Video frame extraction utility
-├── src/
-│   ├── inference/
-│   │   ├── cipo_tracker.py         # 3D ground projection & lane ROI in-path filtering
-│   │   ├── object_detector.py      # YOLO ByteTrack detector (Car & Truck tracking)
-│   │   └── postprocess.py          # Softmax, NMS, and 3D-to-2D projection decoding
-│   └── utils/
-│       ├── calibration.py          # Camera pitch & height 3x4 projection matrix P
-│       ├── split_visualization.py  # 3-Panel Split Window UI (Front View + BEV + HUD)
-│       └── visualization.py        # Top-down Bird's Eye View (BEV) rendering (meters)
-├── requirements.txt                # Python package dependencies
-└── README.md                       # Project documentation & usage guide
-```
-
----
-
-## 🚀 Quick Start (Automatic Setup & Run)
-
-Run the automated setup script to install system dependencies, fetch model weights via Git LFS, configure Python virtual environment, and run inference:
+## Quick Start
 
 ```bash
-# 1. Run 1-step automatic setup
+# 1) One-step setup (system deps, venv, requirements.txt, TensorRT engine)
 chmod +x setup.sh
 ./setup.sh
 
-# 2. Run 3D Lane + YOLO ByteTrack CIPO Pipeline (New)
-./venv/bin/python3 scripts/infer_cipo_pipeline.py --video data/images/example_3.mp4 --output output/example_3_cipo_bytetrack_fixed.mp4
+# 2) Activate venv
+source venv/bin/activate
 
-# 3. Run 3D Lane + YOLO ByteTrack CIPO Pipeline (Headless Mode)
-./venv/bin/python3 scripts/infer_cipo_pipeline.py --video data/images/example_3.mp4 --output output/example_3_cipo_bytetrack_fixed.mp4 --no-gui
+# 3) Run the PySide6 ADAS / BEV app (main UI)
+python scripts/run_pyside6_app.py --video data/images/example_3.mp4
+```
 
-# 4. Run Standalone 3D Lane Video Inference
-./venv/bin/python3 scripts/infer_video_tensorrt.py data/images/example_2.mp4
+Other useful launchers:
 
-# 5. Run Single Image TensorRT GPU Inference
-./venv/bin/python3 scripts/infer_tensorrt.py
+```bash
+# Headless GUI smoke test
+python scripts/run_pyside6_app.py --test-mode
+
+# Custom video + lane engine
+python scripts/run_pyside6_app.py \
+  --video data/images/example_3.mp4 \
+  --model models/anchor3dlane_raw.engine
+
+# Offline CIPO video pipeline (writes annotated MP4)
+python scripts/infer_cipo_pipeline.py \
+  --video data/images/example_3.mp4 \
+  --output output/example_3_cipo.mp4
+
+# Headless CIPO pipeline
+python scripts/infer_cipo_pipeline.py \
+  --video data/images/example_3.mp4 \
+  --output output/example_3_cipo.mp4 \
+  --no-gui
+
+# Lane-only TensorRT video
+python scripts/infer_video_tensorrt.py data/images/example_2.mp4
+
+# Single-image TensorRT test
+python scripts/infer_tensorrt.py
 ```
 
 ---
 
-## 🛠️ Manual Step-by-Step Setup
+## Dependencies
 
-### 1. System Dependencies Installation
+### Python (`requirements.txt`)
 
-Install the required CUDA development libraries, TensorRT, and OpenCV GUI packages:
+Installed automatically by `setup.sh` via `pip install -r requirements.txt`:
+
+| Package | Purpose |
+| :--- | :--- |
+| `numpy<2.0.0` | Arrays / math |
+| `opencv-python-headless>=4.6.0` | Video/image I/O & overlays |
+| `pycuda>=2026.1` | CUDA bindings for TensorRT runtime |
+| `onnxruntime>=1.18.0` | ONNX fallback / tooling |
+| `protobuf>=4.25.0` | ONNX / model protobuf support |
+| `flatbuffers>=23.5.26` | Runtime serialization |
+| `PySide6>=6.6.0` | ADAS GUI (front cam + BEV) |
+
+Manual install (if not using `setup.sh`):
 
 ```bash
-# Update APT and install CUDA libraries, TensorRT binaries, and OpenCV GUI
-sudo apt-get update && sudo apt-get install -y \
-    cuda-toolkit \
-    nvidia-tensorrt-dev \
-    libnvinfer-bin \
-    python3-libnvinfer \
-    python3-opencv \
-    libcurl4-openssl-dev \
-    libsqlite3-dev
+source venv/bin/activate
+pip install -r requirements.txt
 ```
 
-### 2. Python Virtual Environment Setup
+> **Jetson note:** `setup.sh` also copies system `tensorrt` and `cv2` into the venv. YOLO / depth engines may need extra packages such as `ultralytics` and a Jetson-compatible `torch` if you rebuild detectors from `.pt` weights.
 
-Create and set up the Python virtual environment:
+### System packages (via `setup.sh`)
+
+`setup.sh` installs (through `apt`):
+
+- `cuda-toolkit`
+- `nvidia-tensorrt-dev`, `libnvinfer-bin`, `python3-libnvinfer`
+- `python3-opencv`
+- `git-lfs`
+- `libcurl4-openssl-dev`, `libsqlite3-dev`
+
+---
+
+## What `setup.sh` Does
+
+1. Installs system APT packages (CUDA, TensorRT, OpenCV, Git LFS)
+2. Runs `git lfs install` + `git lfs pull` for model weights
+3. Creates `venv` and installs pip
+4. Installs **all packages from `requirements.txt`**
+5. Links system TensorRT / OpenCV into the venv
+6. Builds `models/anchor3dlane_raw.engine` with `trtexec` (FP16) if missing
 
 ```bash
-# Create virtual environment
-python3 -m venv --without-pip venv
-
-# Install pip and required Python packages
-curl -sS https://bootstrap.pypa.io/get-pip.py -o get-pip.py
-./venv/bin/python3 get-pip.py && rm get-pip.py
-
-# Install Python requirements & dependencies
-./venv/bin/pip install "numpy<2" opencv-python pycuda onnxruntime ultralytics torch torchvision
-
-# Link system TensorRT and OpenCV modules to venv
-cp -r /usr/lib/python3.12/dist-packages/tensorrt* ./venv/lib/python3.12/site-packages/
-cp -r /usr/lib/python3/dist-packages/cv2* ./venv/lib/python3.12/site-packages/
-```
-
-### 3. Fetching Model Weights (Git LFS)
-
-Ensure Git LFS is installed and pull the actual 52 MB `.onnx` binary weights file:
-
-```bash
-git lfs install
-git lfs pull
+chmod +x setup.sh
+./setup.sh
 ```
 
 ---
 
-## ⚡ Converting ONNX Model to TensorRT Engine (`.engine`)
+## TensorRT Engine Build
 
-Compile the `.onnx` model into a hardware-optimized TensorRT FP16 engine directly for your Jetson GPU using `trtexec`:
+If the engine is missing or you need to rebuild for this Orin:
 
 ```bash
 trtexec --onnx=models/anchor3dlane_raw.onnx \
@@ -147,30 +112,7 @@ trtexec --onnx=models/anchor3dlane_raw.onnx \
         --fp16
 ```
 
----
-
-## 🚀 Running Inference & Benchmarking
-
-### 1. 3D Lane + YOLO ByteTrack CIPO Pipeline
-Run the full CIPO detection and tracking pipeline:
-
-```bash
-./venv/bin/python3 scripts/infer_cipo_pipeline.py --video data/images/example_3.mp4 --output output/example_3_cipo_bytetrack_fixed.mp4
-```
-> **Features:**
-> - **ByteTrack Multi-Object Tracking:** Tracks Cars & Trucks with persistent tracking IDs (`Car #1`, `Truck #2`).
-> - **3D Lane ROI Filtering:** Projects 2D vehicle boxes to 3D ground space $(X, Y)$ meters and tests if they lie inside the driving lane corridor.
-> - **CIPO Distance Telemetry:** Identifies the Closest In-Path Object and triggers proportional risk alerts (`DANGER` $<15\text{m}$, `WARNING` $15-30\text{m}$, `SAFE` $>30\text{m}$).
-
-### 2. Standalone 3D Lane TensorRT GPU Inference
-Run real-time 3D lane inference with live FPS overlay and Bird's Eye View (BEV) visualization:
-
-```bash
-./venv/bin/python3 scripts/infer_video_tensorrt.py data/images/example_2.mp4
-```
-
-### 3. Benchmark Core GPU Engine FPS via `trtexec`
-Measure pure GPU throughput over 100+ iterations:
+Benchmark:
 
 ```bash
 trtexec --loadEngine=models/anchor3dlane_raw.engine \
@@ -178,9 +120,83 @@ trtexec --loadEngine=models/anchor3dlane_raw.engine \
         --iterations=100
 ```
 
+Expected models for the full PySide6 pipeline:
+
+- `models/anchor3dlane_raw.engine` — 3D lanes
+- `models/yolov8n.engine` — vehicles (ByteTrack)
+- `models/monocular_depth.engine` — depth (optional path)
+
 ---
 
-## 📚 Acknowledgements & References
+## Repository Layout (high level)
 
-- **Model Training & Architecture:** Based on [Anchor3DLane](https://github.com/tusen-ai/anchor3dlane), a 3D anchor-based lane detection framework predicting 3D lane proposals along longitudinal Y-anchor steps.
-- **Dataset:** Trained using the [OpenLane dataset](https://github.com/OpenDriveLab/OpenLane), constructed from Waymo Open Dataset with 3D lane annotations and camera calibration parameters.
+```text
+3d-lane-detection-onnx/
+├── data/                 # Videos, car sprites, caches
+├── models/               # ONNX / TensorRT engines
+├── scripts/
+│   ├── run_pyside6_app.py          # Main GUI launcher
+│   ├── infer_cipo_pipeline.py
+│   ├── infer_video_tensorrt.py
+│   └── infer_tensorrt.py
+├── src/
+│   ├── ui/               # PySide6 main window + BEV widget
+│   ├── inference/        # TRT / CIPO / YOLO / depth
+│   ├── tracking/
+│   └── utils/
+├── requirements.txt
+├── setup.sh
+└── README.md
+```
+
+---
+
+## Merge This Branch Into `main`
+
+Current feature branch example: `Asphalt_view`.
+
+### Option A — merge locally, then push `main`
+
+```bash
+# On your feature branch: commit & push first if needed
+git checkout Asphalt_view
+git status
+git push -u origin Asphalt_view
+
+# Merge into main
+git checkout main
+git pull origin main
+git merge Asphalt_view
+
+# Resolve conflicts if any, then:
+git push origin main
+```
+
+### Option B — GitHub Pull Request (recommended)
+
+```bash
+git checkout Asphalt_view
+git push -u origin Asphalt_view
+
+gh pr create --base main --head Asphalt_view \
+  --title "Asphalt BEV UI + CIPO dashboard updates" \
+  --body "Cinematic BEV road, Anchor3D lane toggle, calibration defaults, FPS fixes."
+
+# After review:
+gh pr merge --merge
+```
+
+### After merge — sync feature branch (optional)
+
+```bash
+git checkout Asphalt_view
+git merge main
+git push origin Asphalt_view
+```
+
+---
+
+## Acknowledgements
+
+- **Model:** [Anchor3DLane](https://github.com/tusen-ai/anchor3dlane)
+- **Dataset:** [OpenLane](https://github.com/OpenDriveLab/OpenLane)
