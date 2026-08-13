@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
 from src.inference.postprocess import ANCHOR_Y_STEPS, decode_lane_pixels
+from src.inference import lane_filter_config as cfg
 
 STANDARD_LANE_WIDTH = 3.7  # Standard highway lane width in meters
 
@@ -54,20 +55,39 @@ def find_ego_lanes(proposals, anchor_len=20):
     return ego_left, ego_right
 
 
-def fill_missing_lane_gaps(proposals, anchor_len=20, standard_lane_width=3.7, min_gap=5.0):
+def fill_missing_lane_gaps(
+    proposals,
+    anchor_len=20,
+    standard_lane_width=3.7,
+    min_gap=None,
+    enabled=None,
+    min_score=None,
+):
     """
-    Inspects detected 3D lane proposals and automatically interpolates missing intermediate lane lines
-    when a gap between adjacent detected lanes is >= min_gap (5.0m).
+    Optionally interpolate missing intermediate lane lines when adjacent gaps are large.
+
+    Disabled by default (see lane_filter_config.ENABLE_FILL_MISSING_LANES) because it
+    invents false positives when detections are noisy.
     """
-    if proposals is None or len(proposals) == 0:
+    if enabled is None:
+        enabled = cfg.ENABLE_FILL_MISSING_LANES
+    if not enabled or proposals is None or len(proposals) == 0:
         return proposals
+
+    min_gap = cfg.FILL_MIN_GAP_M if min_gap is None else min_gap
+    min_score = cfg.FILL_MIN_SCORE if min_score is None else min_score
 
     valid_proposals = []
     for lane in proposals:
         xs, ys, zs, vis = parse_lane_components(lane, anchor_len)
-        if vis.sum() >= 2:
-            mean_x = float(np.mean(xs[vis]))
-            valid_proposals.append((mean_x, lane))
+        if vis.sum() < 2:
+            continue
+        # Prefer high-confidence neighbors when score is available (raw proposal vector).
+        if isinstance(lane, np.ndarray) and lane.ndim == 1 and lane.shape[0] > 1:
+            if float(lane[1]) < min_score:
+                continue
+        mean_x = float(np.mean(xs[vis]))
+        valid_proposals.append((mean_x, lane))
 
     if len(valid_proposals) < 2:
         return proposals

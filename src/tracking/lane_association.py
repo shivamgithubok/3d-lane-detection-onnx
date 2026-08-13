@@ -1,33 +1,45 @@
 import numpy as np
 from src.tracking.ekf_lane_tracker import EKFLaneTracker
 from src.inference.postprocess import ANCHOR_Y_STEPS
+from src.inference import lane_filter_config as cfg
+
 
 class LaneTrackerManager:
     """
     Multi-Lane EKF Tracking Manager.
     Associates raw Anchor3DLane detections with active EKF tracks across frames.
     """
-    def __init__(self, max_missed_frames=10, dist_threshold=2.5):
+
+    def __init__(
+        self,
+        max_missed_frames=None,
+        dist_threshold=None,
+        confirm_hits=None,
+        require_confirmed=None,
+    ):
         self.trackers = []
         self.next_track_id = 1
-        self.max_missed_frames = max_missed_frames
-        self.dist_threshold = dist_threshold
+        self.max_missed_frames = (
+            cfg.EKF_MAX_MISSED_FRAMES if max_missed_frames is None else max_missed_frames
+        )
+        self.dist_threshold = (
+            cfg.EKF_DIST_THRESHOLD_M if dist_threshold is None else dist_threshold
+        )
+        self.confirm_hits = cfg.EKF_CONFIRM_HITS if confirm_hits is None else confirm_hits
+        self.require_confirmed = (
+            cfg.EKF_REQUIRE_CONFIRMED if require_confirmed is None else require_confirmed
+        )
 
     def _compute_distance(self, tracker_pts, proposal_pts):
         """Compute mean BEV lateral distance between predicted tracker points and raw proposal points."""
-        # tracker_pts: N x 3
-        # proposal_pts: N x 3
-        # Compare lateral X coordinates across Y steps
         diff_x = np.abs(tracker_pts[:, 0] - proposal_pts[:, 0])
         return np.mean(diff_x)
 
     def update(self, detected_proposals, dt=0.033):
         """
         Update all EKF trackers with new detected proposals.
-        detected_proposals: list of 3D lane point arrays (each array is N x 3)
-        Returns: list of confirmed smoothed 3D lane proposals
+        Returns list of confirmed smoothed 3D lane proposals.
         """
-        # 1. Predict state for all active trackers
         for trk in self.trackers:
             trk.predict(dt=dt)
 
@@ -52,14 +64,12 @@ class LaneTrackerManager:
         matched_proposals = set()
 
         if num_trackers > 0 and num_proposals > 0:
-            # Build distance cost matrix
             cost_matrix = np.zeros((num_trackers, num_proposals), dtype=np.float32)
             for i, trk in enumerate(self.trackers):
                 trk_pts = trk.get_lane_points(ANCHOR_Y_STEPS)
                 for j, prop_pts in enumerate(proposal_pts_list):
                     cost_matrix[i, j] = self._compute_distance(trk_pts, prop_pts)
 
-            # Greedy matching (minimum distance association)
             for _ in range(min(num_trackers, num_proposals)):
                 min_idx = np.unravel_index(np.argmin(cost_matrix), cost_matrix.shape)
                 min_dist = cost_matrix[min_idx]
@@ -71,27 +81,31 @@ class LaneTrackerManager:
                 if trk_idx not in matched_trackers and prop_idx not in matched_proposals:
                     matched_trackers.add(trk_idx)
                     matched_proposals.add(prop_idx)
-                    # Update tracker with matched proposal 3D points
-                    self.trackers[trk_idx].update(proposal_pts_list[prop_idx])
+                    self.trackers[trk_idx].update(
+                        proposal_pts_list[prop_idx], confirm_hits=self.confirm_hits
+                    )
 
-                # Prevent re-matching
                 cost_matrix[trk_idx, :] = 1e6
                 cost_matrix[:, prop_idx] = 1e6
 
-        # 2. Spawn new trackers for unmatched proposals
         for j in range(num_proposals):
             if j not in matched_proposals:
-                new_trk = EKFLaneTracker(proposal_pts_list[j], track_id=self.next_track_id)
+                new_trk = EKFLaneTracker(
+                    proposal_pts_list[j],
+                    track_id=self.next_track_id,
+                    confirm_hits=self.confirm_hits,
+                )
                 self.next_track_id += 1
                 self.trackers.append(new_trk)
 
-        # 3. Clean up dead trackers (missing for too long)
         self.trackers = [trk for trk in self.trackers if trk.misses <= self.max_missed_frames]
 
-        # 4. Extract smoothed 3D points from active confirmed trackers
         smoothed_lanes = []
         for trk in self.trackers:
-            if trk.is_confirmed or trk.hits >= 2:
+            if self.require_confirmed:
+                if trk.is_confirmed:
+                    smoothed_lanes.append(trk.get_lane_points(ANCHOR_Y_STEPS))
+            elif trk.is_confirmed or trk.hits >= max(2, self.confirm_hits // 2):
                 smoothed_lanes.append(trk.get_lane_points(ANCHOR_Y_STEPS))
 
         return smoothed_lanes

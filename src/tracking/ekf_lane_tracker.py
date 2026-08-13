@@ -19,11 +19,14 @@ class EKFLaneTracker:
       X(Y) = a0 + a1*Y + a2*Y^2 + a3*Y^3
       Z(Y) = b0 + b1*Y + b2*Y^2
     """
-    def __init__(self, init_points_3d, track_id=0):
+    def __init__(self, init_points_3d, track_id=0, confirm_hits=None):
+        from src.inference import lane_filter_config as cfg
+
         self.track_id = track_id
         self.hits = 1
         self.misses = 0
         self.age = 1
+        self.confirm_hits = cfg.EKF_CONFIRM_HITS if confirm_hits is None else confirm_hits
         self.is_confirmed = False
 
         # Fit initial 3D polynomial coefficients from observed 3D points
@@ -71,8 +74,10 @@ class EKFLaneTracker:
         self.misses += 1
         return self.x
 
-    def update(self, points_3d):
+    def update(self, points_3d, confirm_hits=None):
         """Update state using observed 3D points (N x 3: X, Y, Z)."""
+        if confirm_hits is not None:
+            self.confirm_hits = confirm_hits
         if len(points_3d) == 0:
             return
 
@@ -124,7 +129,7 @@ class EKFLaneTracker:
 
         self.hits += 1
         self.misses = 0
-        if self.hits >= 3:
+        if self.hits >= self.confirm_hits:
             self.is_confirmed = True
 
     def get_lane_points(self, y_steps=ANCHOR_Y_STEPS):

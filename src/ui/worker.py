@@ -13,6 +13,7 @@ import os
 import time
 from PySide6.QtCore import QThread, Signal
 from src.inference.postprocess import postprocess_onnx_output
+from src.inference import lane_filter_config as lane_cfg
 from src.utils.drivable_area import extract_ego_corridor_3d
 from src.tracking.lane_association import LaneTrackerManager
 from src.inference.cipo_tracker import CIPOTracker, DEFAULT_P_MATRIX
@@ -61,7 +62,13 @@ class InferenceWorker(QThread):
 
         depth_estimator = None
         tracker = None
-        tracker_manager = LaneTrackerManager(max_missed_frames=10, dist_threshold=2.5)
+        # Lane robustness knobs live in src/inference/lane_filter_config.py
+        tracker_manager = LaneTrackerManager(
+            max_missed_frames=lane_cfg.EKF_MAX_MISSED_FRAMES,
+            dist_threshold=lane_cfg.EKF_DIST_THRESHOLD_M,
+            confirm_hits=lane_cfg.EKF_CONFIRM_HITS,
+            require_confirmed=lane_cfg.EKF_REQUIRE_CONFIRMED,
+        )
 
         # Initialize CUDA Context & Triple TensorRT Engines
         if os.path.exists(self.engine_path):

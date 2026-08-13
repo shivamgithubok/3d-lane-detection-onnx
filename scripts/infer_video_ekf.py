@@ -9,6 +9,7 @@ import pycuda.autoinit
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.inference.postprocess import postprocess_onnx_output, decode_lane_pixels, ANCHOR_Y_STEPS
+from src.inference import lane_filter_config as lane_cfg
 from src.utils.visualization import draw_bev
 from src.tracking.lane_association import LaneTrackerManager
 
@@ -93,7 +94,13 @@ def run_ekf_video_inference(video_path=DEFAULT_VIDEO_PATH, save_output=True):
     context.set_tensor_address("anchors", int(d_anchors))
 
     # Initialize EKF Multi-Lane Tracker Manager
-    tracker_manager = LaneTrackerManager(max_missed_frames=10, dist_threshold=2.5)
+    from src.inference import lane_filter_config as lane_cfg
+    tracker_manager = LaneTrackerManager(
+        max_missed_frames=lane_cfg.EKF_MAX_MISSED_FRAMES,
+        dist_threshold=lane_cfg.EKF_DIST_THRESHOLD_M,
+        confirm_hits=lane_cfg.EKF_CONFIRM_HITS,
+        require_confirmed=lane_cfg.EKF_REQUIRE_CONFIRMED,
+    )
 
     print(f"Opening video source: {video_path}")
     cap = cv2.VideoCapture(video_path)
