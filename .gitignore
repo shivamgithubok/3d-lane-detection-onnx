@@ -35,3 +35,5 @@ data/truck/*.jpeg
 data/truck/*.png
 data/truck/ready/*.png
 data/truck/ready/*.jpeg
+notebooks/train_anchor3dlane_openlane1000.ipynb
+scripts/build_openlane1000_notebook.py

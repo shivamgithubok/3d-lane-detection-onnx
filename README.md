@@ -1,3 +1,14 @@
+<p align="center">
+  <img src="data/Logo/logo.png" alt="Anchor3DLane ADAS Logo" width="480"/>
+</p>
+
+<p align="center">
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License"/></a>
+  <img src="https://img.shields.io/badge/Open%20Source-%E2%9D%A4-red" alt="Open Source"/>
+  <img src="https://img.shields.io/badge/platform-NVIDIA%20Jetson%20Orin-76B900?logo=nvidia" alt="NVIDIA Jetson"/>
+  <img src="https://img.shields.io/badge/python-3.8%2B-blue?logo=python" alt="Python 3.8+"/>
+</p>
+
 # Anchor3DLane Jetson Inference & TensorRT + CIPO BEV ADAS
 
 Real-time **3D lane detection** and **CIPO (Closest In-Path Object)** visualization for **NVIDIA Jetson Orin**, with TensorRT engines, YOLO ByteTrack vehicle tracking, monocular depth, and a PySide6 front-camera + rotatable BEV dashboard.
@@ -200,3 +211,11 @@ git push origin Asphalt_view
 
 - **Model:** [Anchor3DLane](https://github.com/tusen-ai/anchor3dlane)
 - **Dataset:** [OpenLane](https://github.com/OpenDriveLab/OpenLane)
+
+---
+
+## License
+
+This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
+
+Feel free to use, modify, and distribute this software as permitted by the MIT License.
