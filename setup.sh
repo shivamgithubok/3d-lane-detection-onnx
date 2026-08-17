@@ -56,6 +56,15 @@ else
 fi
 
 echo ""
+echo "[5b] YOLOv8-nano TensorRT engine (imgsz=640)..."
+if [ ! -f "models/yolov8n.engine" ]; then
+    ./venv/bin/python scripts/export_yolo_orin.py --imgsz 640
+else
+    echo "YOLO engine already exists at models/yolov8n.engine"
+    echo "  Recompile for this Orin:  python scripts/export_yolo_orin.py --imgsz 640"
+fi
+
+echo ""
 echo "========================================================"
 echo "Setup Complete! Run any of these commands to test:"
 echo "========================================================"

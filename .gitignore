@@ -37,3 +37,16 @@ data/truck/ready/*.png
 data/truck/ready/*.jpeg
 notebooks/train_anchor3dlane_openlane1000.ipynb
 scripts/build_openlane1000_notebook.py
+scripts/patch_mmcv_sanity_cell.py
+scripts/export_yolo_orin.py
+scripts/analyze_bev_frames.py
+data/3d_objects/*.glb
+data/3d_objects/*.gltf
+data/3d_objects/*.glb.zip
+data/3d_objects/*.gltf.zip
+data/3d_objects/*.glb.zip.part
+data/3d_objects/*.gltf.zip.part
+data/3d_objects/*.glb.zip.part.1
+data/3d_objects/*.gltf.zip.part.1
+data/3d_objects/*.glb.zip.part.2
+data/3d_objects/*.gltf.zip.part.2

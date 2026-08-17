@@ -134,7 +134,14 @@ trtexec --loadEngine=models/anchor3dlane_raw.engine \
 Expected models for the full PySide6 pipeline:
 
 - `models/anchor3dlane_raw.engine` — 3D lanes
-- `models/yolov8n.engine` — vehicles (ByteTrack)
+- `models/yolov8n.engine` — YOLOv8-nano vehicles (ByteTrack, imgsz=640)
+
+Compile YOLO for this Orin (backs up the previous engine):
+
+```bash
+source venv/bin/activate
+python scripts/export_yolo_orin.py --imgsz 640
+```
 - `models/monocular_depth.engine` — depth (optional path)
 
 ---
@@ -148,6 +155,7 @@ Expected models for the full PySide6 pipeline:
 ├── scripts/
 │   ├── run_pyside6_app.py          # Main GUI launcher
 │   ├── infer_cipo_pipeline.py
+│   ├── export_yolo_orin.py
 │   ├── infer_video_tensorrt.py
 │   └── infer_tensorrt.py
 ├── src/

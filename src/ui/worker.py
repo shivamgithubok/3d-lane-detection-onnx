@@ -17,7 +17,6 @@ from src.inference import lane_filter_config as lane_cfg
 from src.utils.drivable_area import extract_ego_corridor_3d
 from src.tracking.lane_association import LaneTrackerManager
 from src.inference.cipo_tracker import CIPOTracker, DEFAULT_P_MATRIX
-from src.inference.trt_yolo_detector import TRTYOLOVehicleDetector
 from src.inference.trt_depth_estimator import TRTMonocularDepthEstimator
 from src.inference.object_detector import OfflineYOLOVehicleDetector
 from src.utils.split_visualization import draw_front_view_cipo
@@ -49,8 +48,8 @@ class InferenceWorker(QThread):
         self.depth_engine_path = "models/monocular_depth.engine"
         self.running = False
         self.paused = False
-        # Initialize YOLO detector once with ByteTrack persistence using the TensorRT engine
-        self.detector = OfflineYOLOVehicleDetector(model_path="models/yolov8n.engine")
+        # YOLO is created on the worker thread after CUDA is ready (avoids empty/missed frames)
+        self.detector = None
 
     def run(self):
         self.running = True
@@ -62,6 +61,7 @@ class InferenceWorker(QThread):
 
         depth_estimator = None
         tracker = None
+        detector = None
         # Lane robustness knobs live in src/inference/lane_filter_config.py
         tracker_manager = LaneTrackerManager(
             max_missed_frames=lane_cfg.EKF_MAX_MISSED_FRAMES,
@@ -110,8 +110,29 @@ class InferenceWorker(QThread):
                 trt_context.set_tensor_address("reg_proposals", int(d_reg_proposals))
                 trt_context.set_tensor_address("anchors", int(d_anchors))
 
-                # 2. YOLO Vehicle Detector (ByteTrack) already initialized as self.detector
-                detector = self.detector
+                # 2. YOLO nano + ByteTrack (pop pycuda so Ultralytics/TensorRT can load)
+                detector = None
+                try:
+                    cuda_ctx.pop()
+                except Exception:
+                    pass
+                try:
+                    yolo_path = self.yolo_engine_path
+                    if not os.path.isfile(yolo_path):
+                        yolo_path = "models/yolov8n.pt"
+                    self.detector = OfflineYOLOVehicleDetector(
+                        model_path=yolo_path, conf_thresh=0.22, imgsz=640
+                    )
+                    detector = self.detector
+                except Exception as ye:
+                    self.status_message.emit(f"YOLO init warning: {ye}")
+                    self.detector = None
+                    detector = None
+                finally:
+                    try:
+                        cuda_ctx.push()
+                    except Exception:
+                        pass
 
                 # 3. Load Monocular Depth Estimator Engine
                 if os.path.exists(self.depth_engine_path):
@@ -172,7 +193,20 @@ class InferenceWorker(QThread):
                     proposals = smoothed_proposals if len(smoothed_proposals) > 0 else raw_proposals
 
                     # Step B: YOLO Vehicle Detection & Depth Map Estimation
-                    raw_detections = detector.detect(frame) if detector else []
+                    # Pop pycuda context so Ultralytics/TensorRT YOLO can use the GPU (P0)
+                    if cuda_ctx is not None:
+                        try:
+                            cuda_ctx.pop()
+                        except Exception:
+                            pass
+                    try:
+                        raw_detections = detector.detect(frame) if detector else []
+                    finally:
+                        if cuda_ctx is not None:
+                            try:
+                                cuda_ctx.push()
+                            except Exception:
+                                pass
                     depth_map = last_depth_map
                     if depth_estimator and (frame_i % DEPTH_EVERY_N == 0 or last_depth_map is None):
                         depth_map, _, _ = depth_estimator.estimate_depth_map(frame)

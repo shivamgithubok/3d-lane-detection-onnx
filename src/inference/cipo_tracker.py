@@ -19,6 +19,8 @@ class CIPOTracker:
         self.warning_dist = warning_dist # 15m - 30m WARNING (Yellow)
         self.ema_alpha = ema_alpha       # Temporal Exponential Moving Average smoothing factor
         self.track_history = {}          # History dict for temporal smoothing per track_id
+        self._hist_frame = 0
+        self._hist_ttl = 20              # drop unused IDs (~1–2s) so ByteTrack reuse doesn't teleport
 
     def project_2d_to_3d_ground(self, u, v):
         """
@@ -71,62 +73,65 @@ class CIPOTracker:
         y_t = float(np.clip(y_target, y_valid[0], y_valid[-1]))
         return float(np.interp(y_t, y_valid, x_valid))
 
-    def _lane_aware_x(self, u_model, v_model, y_fwd, x_geom, ego_left, ego_right):
+    def _lane_aware_x(self, u_model, v_model, y_fwd, x_geom, proposals):
         """
-        Place the car in the correct BEV lane using 2D image-lane association,
-        then map onto 3D lane X at the vehicle's forward distance.
+        Snap lateral X to a detected-lane center.
 
-        Geometric/depth X alone underestimates |X| — adjacent-lane cars collapse
-        into the ego corridor on the BEV. Lane association is the reliable signal.
+        Using only the ego pair collapses every adjacent car into one slot
+        (they overlap on the BEV). All lane lines at this depth are used.
         """
-        u_left = self.get_2d_lane_u_at_v(ego_left, v_model) if ego_left is not None else None
-        u_right = self.get_2d_lane_u_at_v(ego_right, v_model) if ego_right is not None else None
+        if proposals is None or len(proposals) == 0:
+            return x_geom
 
-        x_left = self.get_lane_x_at_y(ego_left, y_fwd)
-        x_right = self.get_lane_x_at_y(ego_right, y_fwd)
+        samples = []
+        for lane in proposals:
+            u = self.get_2d_lane_u_at_v(lane, v_model)
+            x = self.get_lane_x_at_y(lane, y_fwd)
+            if u is None and x is None:
+                continue
+            samples.append((u, x))
 
-        # Ego corridor width from detected boundaries (fallback = standard lane)
-        if x_left is not None and x_right is not None:
-            ego_width = max(2.5, abs(x_right - x_left))
+        xs = sorted(x for _, x in samples if x is not None)
+        uniq = []
+        for x in xs:
+            if not uniq or abs(x - uniq[-1]) > 0.8:
+                uniq.append(x)
+        xs = uniq
+        if not xs:
+            return x_geom
+
+        if len(xs) == 1:
+            w = STANDARD_LANE_WIDTH
+            centers = [xs[0] - w, xs[0], xs[0] + w]
         else:
-            ego_width = STANDARD_LANE_WIDTH
+            widths = [xs[i + 1] - xs[i] for i in range(len(xs) - 1)]
+            med_w = float(np.median(widths))
+            med_w = max(2.8, min(4.6, med_w))
+            centers = [xs[0] - 0.5 * med_w]
+            for i in range(len(xs) - 1):
+                centers.append(0.5 * (xs[i] + xs[i + 1]))
+            centers.append(xs[-1] + 0.5 * med_w)
 
-        # ── Left of ego-left boundary → left adjacent lane ──
-        if u_left is not None and u_model < u_left - 3.0:
-            if x_left is not None:
-                # Map how far left of the boundary (image px) into lane widths
-                # ~80 model-px ≈ one full adjacent lane
-                px_left = max(0.0, (u_left - 3.0) - u_model)
-                t = float(np.clip(px_left / 80.0, 0.30, 1.20))
-                x_lane = x_left - t * ego_width
+        with_u = [(u, x) for u, x in samples if u is not None and x is not None]
+        with_u.sort(key=lambda t: t[0])
+        snapped = None
+        if len(with_u) >= 2:
+            us = [t[0] for t in with_u]
+            xsu = [t[1] for t in with_u]
+            if u_model <= us[0]:
+                snapped = centers[0]
+            elif u_model >= us[-1]:
+                snapped = centers[-1]
             else:
-                x_lane = -ego_width * 1.0
-            # Keep mild geometric spread when already clearly left
-            if x_geom < x_lane:
-                return 0.75 * x_lane + 0.25 * x_geom
-            return x_lane
+                for i in range(len(us) - 1):
+                    if us[i] <= u_model <= us[i + 1]:
+                        snapped = 0.5 * (xsu[i] + xsu[i + 1])
+                        break
+        if snapped is None:
+            snapped = min(centers, key=lambda c: abs(c - x_geom))
 
-        # ── Right of ego-right boundary → right adjacent lane ──
-        if u_right is not None and u_model > u_right + 3.0:
-            if x_right is not None:
-                px_right = max(0.0, u_model - (u_right + 3.0))
-                t = float(np.clip(px_right / 80.0, 0.30, 1.20))
-                x_lane = x_right + t * ego_width
-            else:
-                x_lane = ego_width * 1.0
-            if x_geom > x_lane:
-                return 0.75 * x_lane + 0.25 * x_geom
-            return x_lane
-
-        # ── Inside ego lane in the camera → interpolate between ego boundaries ──
-        if u_left is not None and u_right is not None and x_left is not None and x_right is not None:
-            denom = (u_right - u_left)
-            if abs(denom) > 1e-3:
-                t = float(np.clip((u_model - u_left) / denom, 0.05, 0.95))
-                return x_left + t * (x_right - x_left)
-
-        # Fallback: geometric / depth X
-        return x_geom
+        # Small within-lane offset from geometry, without collapsing lanes
+        return snapped + 0.12 * float(np.clip(x_geom - snapped, -1.5, 1.5))
 
     def _lane_rank(self, u_model, v_model, x_3d, ego_left, ego_right):
         """
@@ -169,6 +174,8 @@ class CIPOTracker:
         scale_v = 360.0 / float(h_img)
 
         ego_left, ego_right = find_ego_lanes(lane_proposals, ANCHOR_LEN)
+        self._hist_frame += 1
+        seen_ids = set()
 
         for det in detections:
             x1, y1, x2, y2 = det['bbox']
@@ -193,19 +200,22 @@ class CIPOTracker:
 
             # 2. Lane-aware lateral X (keeps adjacent-lane cars out of ego corridor)
             X_meas = self._lane_aware_x(
-                u_model, v_model, Y_meas, X_geom, ego_left, ego_right
+                u_model, v_model, Y_meas, X_geom, lane_proposals
             )
 
-            # 3. Temporal EMA smoothing per track_id
-            if track_id > 0 and track_id in self.track_history:
-                hist = self.track_history[track_id]
+            # 3. Temporal EMA smoothing per track_id (skip stale IDs ByteTrack may reuse)
+            hist = self.track_history.get(track_id) if track_id > 0 else None
+            if hist is not None and hist.get('frame', 0) >= self._hist_frame - 2:
                 X_3d = self.ema_alpha * X_meas + (1.0 - self.ema_alpha) * hist['X']
                 Y_3d = self.ema_alpha * Y_meas + (1.0 - self.ema_alpha) * hist['Z']
             else:
                 X_3d, Y_3d = X_meas, Y_meas
 
             if track_id > 0:
-                self.track_history[track_id] = {'X': X_3d, 'Z': Y_3d}
+                self.track_history[track_id] = {
+                    'X': X_3d, 'Z': Y_3d, 'frame': self._hist_frame
+                }
+                seen_ids.add(track_id)
 
             # 4. In-path / CIPO from 2D lane association (camera space)
             u_left_2d = self.get_2d_lane_u_at_v(ego_left, v_model) if ego_left is not None else None
@@ -234,8 +244,7 @@ class CIPOTracker:
             Y_ground = float(((v_model * Y_3d) - self.P[1, 2] * Y_3d - self.P[1, 3]) / (self.P[1, 1] + 1e-6))
 
             lane_rank = self._lane_rank(u_model, v_model, X_3d, ego_left, ego_right)
-            # BEV overlay: ego + adjacent (2nd) only — hide 3rd+ lanes
-            show_bev = lane_rank <= 1
+            show_bev = True
 
             obj_info = {
                 'bbox': [int(x1), int(y1), int(x2), int(y2)],
@@ -254,5 +263,12 @@ class CIPOTracker:
             }
 
             processed_objects.append(obj_info)
+
+        stale = [
+            tid for tid, h in self.track_history.items()
+            if h.get('frame', 0) < self._hist_frame - self._hist_ttl
+        ]
+        for tid in stale:
+            self.track_history.pop(tid, None)
 
         return processed_objects, None

@@ -13,11 +13,11 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QImage, QPixmap, QFont, QIcon
 
 from src.ui.worker import InferenceWorker
-from src.ui.bev_widget import BEVWidget
+from src.ui.bev_quick3d import BevQuick3DWidget, create_bev_widget
 from src.ui.calibration_panel import CalibrationPanel
 
 class ADASMainWindow(QMainWindow):
-    def __init__(self, video_path=None, model_path="models/anchor3dlane_raw.engine"):
+    def __init__(self, video_path=None, model_path="models/anchor3dlane_raw.engine", bev_backend="quick3d"):
 
         super().__init__()
         self.setWindowTitle("Futuristic 3D Lane & ADAS Cockpit (PySide6)")
@@ -26,6 +26,7 @@ class ADASMainWindow(QMainWindow):
 
         self.video_path = video_path
         self.model_path = model_path
+        self.bev_backend = bev_backend
 
         # Setup Theme & Layout
         self.apply_dark_theme()
@@ -68,9 +69,9 @@ class ADASMainWindow(QMainWindow):
                 background-color: #21262D;
                 color: #C9D1D9;
                 border: 1px solid #30363D;
-                border-radius: 4px;
-                padding: 6px 14px;
-                font-weight: bold;
+                border-radius: 3px;
+                padding: 2px 8px;
+                font-size: 11px;
             }
             QPushButton#ctrl_btn:hover {
                 background-color: #30363D;
@@ -95,7 +96,7 @@ class ADASMainWindow(QMainWindow):
         header = QFrame()
         header.setObjectName("header_bar")
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(15, 8, 15, 8)
+        header_layout.setContentsMargins(12, 4, 12, 4)
 
         lbl_title = QLabel("🛣️ 3D LANE DETECTION & BEV ADAS VISUALIZER")
         lbl_title.setObjectName("title_label")
@@ -156,42 +157,39 @@ class ADASMainWindow(QMainWindow):
         # Right Container: BEV Canvas & Extrinsics Calibration Panel
         right_container = QWidget()
         right_layout = QVBoxLayout(right_container)
-        right_layout.setContentsMargins(5, 10, 10, 10)
+        right_layout.setContentsMargins(4, 4, 8, 4)
+        right_layout.setSpacing(0)
 
-        # Interactive BEV Widget
-        self.bev_widget = BEVWidget()
+        # Interactive BEV Widget (Qt Quick 3D or QPainter fallback)
+        self.bev_widget = create_bev_widget(self.bev_backend)
         right_layout.addWidget(self.bev_widget, stretch=1)
 
-        # Calibration Panel & BEV Controls
-        bev_ctrl_layout = QHBoxLayout()
-        btn_reset_bev = QPushButton("🔍 Reset BEV View")
-        btn_reset_bev.setObjectName("ctrl_btn")
-        btn_reset_bev.clicked.connect(self.bev_widget.reset_view)
-        bev_ctrl_layout.addWidget(btn_reset_bev)
-
-        self.btn_road_style = QPushButton("🛣 Road: Cinematic")
-        self.btn_road_style.setObjectName("ctrl_btn")
-        self.btn_road_style.setToolTip("Toggle cinematic highway vs classic grid road")
-        self.btn_road_style.clicked.connect(self.toggle_road_style)
-        bev_ctrl_layout.addWidget(self.btn_road_style)
-
-        self.btn_lane_lines = QPushButton("〰 3D Lanes: ON")
-        self.btn_lane_lines.setObjectName("ctrl_btn")
-        self.btn_lane_lines.setCheckable(True)
-        self.btn_lane_lines.setChecked(True)
-        self.btn_lane_lines.setToolTip("Show / hide Anchor3D detected lane lines on BEV")
-        self.btn_lane_lines.clicked.connect(self.toggle_lane_lines)
-        bev_ctrl_layout.addWidget(self.btn_lane_lines)
-
-        bev_ctrl_layout.addStretch()
-        right_layout.addLayout(bev_ctrl_layout)
-
-        # Extrinsics Calibration Sliders (defaults: pitch -7°, height 1.0 m)
-        self.calib_panel = CalibrationPanel()
-        self.calib_panel.calibration_changed.connect(self.bev_widget.set_calibration)
-        # Apply preferred extrinsics immediately so BEV matches the tuner on launch
-        self.bev_widget.set_calibration(self.calib_panel.pitch_deg, self.calib_panel.height_m)
-        right_layout.addWidget(self.calib_panel)
+        self.btn_road_style = None
+        self.btn_lane_lines = None
+        self.calib_panel = None
+        if not isinstance(self.bev_widget, BevQuick3DWidget):
+            # Painter BEV has no QML overlay — keep a compact widget strip.
+            bev_ctrl_layout = QHBoxLayout()
+            btn_reset_bev = QPushButton("Reset BEV")
+            btn_reset_bev.setObjectName("ctrl_btn")
+            btn_reset_bev.clicked.connect(self.bev_widget.reset_view)
+            bev_ctrl_layout.addWidget(btn_reset_bev)
+            self.btn_road_style = QPushButton("Road: Cinematic")
+            self.btn_road_style.setObjectName("ctrl_btn")
+            self.btn_road_style.clicked.connect(self.toggle_road_style)
+            bev_ctrl_layout.addWidget(self.btn_road_style)
+            self.btn_lane_lines = QPushButton("Lanes: ON")
+            self.btn_lane_lines.setObjectName("ctrl_btn")
+            self.btn_lane_lines.setCheckable(True)
+            self.btn_lane_lines.setChecked(True)
+            self.btn_lane_lines.clicked.connect(self.toggle_lane_lines)
+            bev_ctrl_layout.addWidget(self.btn_lane_lines)
+            bev_ctrl_layout.addStretch()
+            self.calib_panel = CalibrationPanel()
+            self.calib_panel.calibration_changed.connect(self.bev_widget.set_calibration)
+            self.bev_widget.set_calibration(self.calib_panel.pitch_deg, self.calib_panel.height_m)
+            bev_ctrl_layout.addWidget(self.calib_panel)
+            right_layout.addLayout(bev_ctrl_layout)
 
         splitter.addWidget(right_container)
         splitter.setSizes([640, 640])
@@ -249,12 +247,14 @@ class ADASMainWindow(QMainWindow):
 
     def toggle_road_style(self):
         cinematic = self.bev_widget.toggle_cinematic_road()
-        self.btn_road_style.setText("🛣 Road: Cinematic" if cinematic else "🛣 Road: Grid")
+        if self.btn_road_style is not None:
+            self.btn_road_style.setText("Road: Cinematic" if cinematic else "Road: Grid")
 
     def toggle_lane_lines(self):
         show = self.bev_widget.toggle_lane_lines()
-        self.btn_lane_lines.setChecked(show)
-        self.btn_lane_lines.setText("〰 3D Lanes: ON" if show else "〰 3D Lanes: OFF")
+        if self.btn_lane_lines is not None:
+            self.btn_lane_lines.setChecked(show)
+            self.btn_lane_lines.setText("Lanes: ON" if show else "Lanes: OFF")
 
     def open_video_file(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "Open MP4 Video File", "", "Video Files (*.mp4 *.avi *.mkv)")

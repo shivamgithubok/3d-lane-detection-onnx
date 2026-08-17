@@ -11,7 +11,7 @@ import pycuda.autoinit
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.inference.postprocess import postprocess_onnx_output, decode_lane_pixels
 from src.inference.cipo_tracker import CIPOTracker, DEFAULT_P_MATRIX
-from src.inference.trt_yolo_detector import TRTYOLOVehicleDetector
+from src.inference.object_detector import OfflineYOLOVehicleDetector
 from src.inference.trt_depth_estimator import TRTMonocularDepthEstimator
 from src.utils.split_visualization import draw_bev_cipo, draw_front_view_cipo, create_split_window
 
@@ -73,8 +73,10 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
     context.set_tensor_address("anchors", int(d_anchors))
 
     # 2. Initialize Object Detector & CIPO Tracker
-    print("[Pipeline] Initializing Triple-TensorRT Objects, Lanes & Depth Engines...")
-    detector = TRTYOLOVehicleDetector("models/yolov8n.engine")
+    print("[Pipeline] Initializing YOLO-nano ByteTrack, lanes & depth engines...")
+    detector = OfflineYOLOVehicleDetector(
+        model_path="models/yolov8n.engine", conf_thresh=0.22, imgsz=640
+    )
     depth_estimator = TRTMonocularDepthEstimator("models/monocular_depth.engine")
     tracker = CIPOTracker(P_matrix=DEFAULT_P_MATRIX, danger_dist=15.0, warning_dist=30.0)
 
@@ -125,8 +127,22 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
         # Step C: Decode 3D Lane Proposals
         lane_proposals, lane_scores = postprocess_onnx_output(h_reg_proposals)
 
-        # Step D: Run Object Detection & Monocular Depth Estimation
-        raw_detections = detector.detect(frame)
+        # Step D: YOLO (release pycuda ctx so Ultralytics TRT can run) + depth
+        yolo_ctx = None
+        try:
+            yolo_ctx = cuda.Context.get_current()
+            if yolo_ctx is not None:
+                yolo_ctx.pop()
+        except Exception:
+            yolo_ctx = None
+        try:
+            raw_detections = detector.detect(frame)
+        finally:
+            if yolo_ctx is not None:
+                try:
+                    yolo_ctx.push()
+                except Exception:
+                    pass
         depth_map, _, _ = depth_estimator.estimate_depth_map(frame)
 
         # Step E: Process CIPO Tracker & 3D ROI In-Path Check
