@@ -15,6 +15,7 @@ from PySide6.QtGui import QImage, QPixmap, QFont, QIcon
 from src.ui.worker import InferenceWorker
 from src.ui.bev_quick3d import BevQuick3DWidget, create_bev_widget
 from src.ui.calibration_panel import CalibrationPanel
+from src.utils.calibration import preset_for_video
 
 class ADASMainWindow(QMainWindow):
     def __init__(self, video_path=None, model_path="models/anchor3dlane_raw.engine", bev_backend="quick3d"):
@@ -27,6 +28,7 @@ class ADASMainWindow(QMainWindow):
         self.video_path = video_path
         self.model_path = model_path
         self.bev_backend = bev_backend
+        self.preset_pitch, self.preset_height = preset_for_video(video_path)
 
         # Setup Theme & Layout
         self.apply_dark_theme()
@@ -36,7 +38,24 @@ class ADASMainWindow(QMainWindow):
         self.worker = InferenceWorker(video_path=self.video_path, model_path=self.model_path)
         self.worker.frame_processed.connect(self.on_frame_processed)
         self.worker.status_message.connect(self.on_status_message)
+        # Cal shows OpenLane defaults; P is locked in the worker (do not retune for Garmin).
+        # Do NOT push Cal pitch into BEV calibPitch — that is a view tilt, not extrinsics.
+        if self.calib_panel is not None:
+            self.calib_panel.calibration_changed.connect(self.on_calibration_changed)
+            self.worker.set_calibration(self.calib_panel.pitch_deg, self.calib_panel.height_m)
         self.worker.start()
+
+    def on_calibration_changed(self, pitch_deg, height_m):
+        # Snap UI back to training extrinsics; never rebuild P from free sliders.
+        if abs(pitch_deg - self.preset_pitch) > 1e-3 or abs(height_m - self.preset_height) > 1e-3:
+            self.calib_panel.blockSignals(True)
+            self.calib_panel.reset_defaults()
+            self.calib_panel.blockSignals(False)
+            self.statusBar().showMessage(
+                "P locked to OpenLane (−3° / 1.5 m) — retuning breaks corridor projection",
+                4000,
+            )
+        self.worker.set_calibration(self.preset_pitch, self.preset_height)
 
     def apply_dark_theme(self):
         """Applies a sleek, dark ADAS futuristic theme."""
@@ -166,10 +185,9 @@ class ADASMainWindow(QMainWindow):
 
         self.btn_road_style = None
         self.btn_lane_lines = None
-        self.calib_panel = None
+        # Always show extrinsics (P2) — drives front P_matrix + BEV camera
+        bev_ctrl_layout = QHBoxLayout()
         if not isinstance(self.bev_widget, BevQuick3DWidget):
-            # Painter BEV has no QML overlay — keep a compact widget strip.
-            bev_ctrl_layout = QHBoxLayout()
             btn_reset_bev = QPushButton("Reset BEV")
             btn_reset_bev.setObjectName("ctrl_btn")
             btn_reset_bev.clicked.connect(self.bev_widget.reset_view)
@@ -184,12 +202,12 @@ class ADASMainWindow(QMainWindow):
             self.btn_lane_lines.setChecked(True)
             self.btn_lane_lines.clicked.connect(self.toggle_lane_lines)
             bev_ctrl_layout.addWidget(self.btn_lane_lines)
-            bev_ctrl_layout.addStretch()
-            self.calib_panel = CalibrationPanel()
-            self.calib_panel.calibration_changed.connect(self.bev_widget.set_calibration)
-            self.bev_widget.set_calibration(self.calib_panel.pitch_deg, self.calib_panel.height_m)
-            bev_ctrl_layout.addWidget(self.calib_panel)
-            right_layout.addLayout(bev_ctrl_layout)
+        bev_ctrl_layout.addStretch()
+        self.calib_panel = CalibrationPanel(
+            pitch_deg=self.preset_pitch, height_m=self.preset_height
+        )
+        bev_ctrl_layout.addWidget(self.calib_panel)
+        right_layout.addLayout(bev_ctrl_layout)
 
         splitter.addWidget(right_container)
         splitter.setSizes([640, 640])
@@ -230,6 +248,8 @@ class ADASMainWindow(QMainWindow):
             self.lbl_status_hud.setStyleSheet("background-color: #DA3633; color: #FFFFFF;")
         elif cipo_status == "WARNING":
             self.lbl_status_hud.setStyleSheet("background-color: #D9822B; color: #FFFFFF;")
+        elif cipo_status == "DEGRADED":
+            self.lbl_status_hud.setStyleSheet("background-color: #6E7681; color: #FFFFFF;")
         else:
             self.lbl_status_hud.setStyleSheet("background-color: #238636; color: #FFFFFF;")
 

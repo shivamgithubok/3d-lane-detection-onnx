@@ -57,19 +57,22 @@ Item {
     property string corridorJson: "[]"
     property string laneJson: "[]"
     property string dashJson: "[]"
+    property string edgeJson: "[]"
 
     onTrafficJsonChanged: applyTraffic()
     onTeslaYChanged: applyTraffic()
     onCorridorJsonChanged: applySegPool(corrRep, root.corridorJson, 0.035)
     onLaneJsonChanged: applyLanes()
     onDashJsonChanged: applyDashes()
-    onShowLaneLinesChanged: { applyLanes(); applyDashes() }
-    onCinematicRoadChanged: { applyLanes(); applyDashes() }
+    onEdgeJsonChanged: applyEdges()
+    onShowLaneLinesChanged: { applyLanes(); applyDashes(); applyEdges() }
+    onCinematicRoadChanged: { applyLanes(); applyDashes(); applyEdges() }
 
     Component.onCompleted: {
         applySegPool(corrRep, root.corridorJson, 0.035)
         applyLanes()
         applyDashes()
+        applyEdges()
     }
 
     function applyLanes() {
@@ -91,6 +94,16 @@ Item {
     function applyDashes() {
         const src = (root.cinematicRoad && root.dashJson) ? root.dashJson : "[]"
         applySegPool(dashRep, src, 0.03)
+    }
+
+    function applyEdges() {
+        // P1: dynamic outer edges from detections; hide static ±5.35 when live
+        let rows = []
+        try { rows = JSON.parse(root.edgeJson || "[]") } catch (e) { rows = [] }
+        const hasDyn = root.cinematicRoad && rows.length > 0
+        staticEdgeL.visible = root.cinematicRoad && !hasDyn
+        staticEdgeR.visible = root.cinematicRoad && !hasDyn
+        applySegPool(edgeRep, hasDyn ? root.edgeJson : "[]", 0.028)
     }
 
     function applyTraffic() {
@@ -263,6 +276,7 @@ Item {
         }
 
         Model {
+            id: staticEdgeL
             visible: root.cinematicRoad
             source: "#Cube"
             position: Qt.vector3d(-5.35, 0.025, -40)
@@ -273,6 +287,7 @@ Item {
             }
         }
         Model {
+            id: staticEdgeR
             visible: root.cinematicRoad
             source: "#Cube"
             position: Qt.vector3d(5.35, 0.025, -40)
@@ -280,6 +295,19 @@ Item {
             materials: PrincipledMaterial {
                 lighting: PrincipledMaterial.NoLighting
                 baseColor: "#ebefff"
+            }
+        }
+
+        Repeater3D {
+            id: edgeRep
+            model: 24
+            Model {
+                visible: false
+                source: "#Cube"
+                materials: PrincipledMaterial {
+                    lighting: PrincipledMaterial.NoLighting
+                    baseColor: "#ebefff"
+                }
             }
         }
 

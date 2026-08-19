@@ -31,7 +31,7 @@ from src.ui.car_assets import (
     TRUCK_LABELS,
     asset_url,
 )
-from src.utils.drivable_area import find_ego_lanes, parse_lane_components
+from src.utils.drivable_area import find_ego_lanes, find_outer_lanes, parse_lane_components
 
 # Local copies — do not import bev_widget (QPainter + sprite pipeline).
 BEV_MAX_DIST_M = 60.0
@@ -67,6 +67,7 @@ class BevQuick3DWidget(QQuickWidget):
         self._last_corridor_json = None
         self._last_lane_json = None
         self._last_dash_json = None
+        self._last_edge_json = None
 
         self.setSource(QUrl.fromLocalFile(os.path.abspath(_QML_PATH)))
         if self.status() == QQuickWidget.Error:
@@ -310,6 +311,47 @@ class BevQuick3DWidget(QQuickWidget):
                 break
         return rows[:28]
 
+    def _edge_payload(self, proposals):
+        """
+        P1: dynamic outer road-edge ribbons from outermost detected lanes.
+        Falls back to empty → QML keeps static ±5.35 only when no detections.
+        """
+        rows = []
+        if not proposals:
+            return rows
+        outer_l, outer_r = find_outer_lanes(proposals)
+        for lane in (outer_l, outer_r):
+            if lane is None:
+                continue
+            try:
+                xs, ys, zs, vis = parse_lane_components(lane)
+            except Exception:
+                continue
+            xy = self._visible_xy(xs, ys, vis)
+            if len(xy) < 2:
+                continue
+            # Thicker white edge (w~0.22) along detected outer polyline
+            n = len(xy)
+            step = max(1, (n - 1) // 10)
+            i = 0
+            while i + step < n and len(rows) < 24:
+                x0, y0 = xy[i]
+                x1, y1 = xy[i + step]
+                dx = x1 - x0
+                dy = y1 - y0
+                length = math.hypot(dx, dy)
+                if length >= 0.6:
+                    yaw = math.degrees(math.atan2(dx, -dy))
+                    rows.append({
+                        "x": round(0.5 * (x0 + x1), 2),
+                        "z": round(-0.5 * (y0 + y1), 2),
+                        "yaw": round(yaw, 1),
+                        "len": round(length, 2),
+                        "w": 0.22,
+                    })
+                i += step
+        return rows[:24]
+
     @staticmethod
     def _ribbon_segments(xy, pal, max_segs=12):
         if len(xy) < 2:
@@ -481,6 +523,10 @@ class BevQuick3DWidget(QQuickWidget):
         if dashes != self._last_dash_json:
             self._last_dash_json = dashes
             self._set("dashJson", dashes)
+        edges = json.dumps(self._edge_payload(self.proposals), separators=(",", ":"))
+        if edges != self._last_edge_json:
+            self._last_edge_json = edges
+            self._set("edgeJson", edges)
 
     def reset_view(self):
         self._push_camera(

@@ -1,13 +1,12 @@
 import numpy as np
-from src.utils.drivable_area import find_ego_lanes, parse_lane_components, STANDARD_LANE_WIDTH
+from src.utils.drivable_area import find_ego_lanes, parse_lane_components, STANDARD_LANE_WIDTH, pair_gap_m
 from src.inference.postprocess import decode_lane_pixels
+from src.utils.calibration import P_final
+from src.inference import lane_filter_config as cfg
 
-# Camera Projection Matrix for cam_height = 1.5m and pitch = -3 degrees
-DEFAULT_P_MATRIX = np.array([
-    [503.75, 239.67108834, 12.5606295, 0.0],
-    [0.0, 181.326628, -557.993558, 850.078125],
-    [0.0, 0.998629535, 0.0523359562, 0.0]
-])
+# Single source of truth: cam_height=1.5m, pitch=-3°, then crop/resize to 480x360
+# (same as src.utils.calibration.P_final — do not hardcode a divergent copy)
+DEFAULT_P_MATRIX = np.asarray(P_final, dtype=np.float64)
 
 ANCHOR_LEN = 20
 ANCHOR_Y_STEPS = np.array([5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100], dtype=np.float64)
@@ -21,6 +20,8 @@ class CIPOTracker:
         self.track_history = {}          # History dict for temporal smoothing per track_id
         self._hist_frame = 0
         self._hist_ttl = 20              # drop unused IDs (~1–2s) so ByteTrack reuse doesn't teleport
+        # P1: per-track in-path hysteresis (enter/exit)
+        self._inpath_state = {}         # tid -> {in_path, hits, miss}
 
     def project_2d_to_3d_ground(self, u, v):
         """
@@ -167,13 +168,28 @@ class CIPOTracker:
             return 1
         return 2
 
-    def process_detections(self, detections, lane_proposals, frame_size=(1080, 720), depth_map=None, depth_estimator=None):
+    def process_detections(
+        self,
+        detections,
+        lane_proposals,
+        frame_size=(1080, 720),
+        depth_map=None,
+        depth_estimator=None,
+        ego_left=None,
+        ego_right=None,
+        frame_transform=None,
+        road_state_confirmed=True,
+    ):
         processed_objects = []
         w_img, h_img = frame_size
         scale_u = 480.0 / float(w_img)
         scale_v = 360.0 / float(h_img)
 
-        ego_left, ego_right = find_ego_lanes(lane_proposals, ANCHOR_LEN)
+        # A caller with a shared road state supplies the validated ego pair.
+        # The legacy fallback is retained only for old callers; production paths
+        # pass road_state_confirmed=False when the pair is missing or stale.
+        if road_state_confirmed and ego_left is None and ego_right is None:
+            ego_left, ego_right = find_ego_lanes(lane_proposals, ANCHOR_LEN)
         self._hist_frame += 1
         seen_ids = set()
 
@@ -184,8 +200,17 @@ class CIPOTracker:
             u_img = (x1 + x2) / 2.0
             v_img = float(y2)
 
-            u_model = u_img * scale_u
-            v_model = v_img * scale_v
+            if frame_transform is not None:
+                if not frame_transform.source_point_is_visible_to_model(u_img, v_img):
+                    # This object is outside the lane model's calibrated crop;
+                    # never classify it as in-path from unrelated coordinates.
+                    continue
+                u_model, v_model = frame_transform.source_to_model(
+                    np.array([[u_img, v_img]], dtype=np.float64)
+                )[0]
+            else:
+                u_model = u_img * scale_u
+                v_model = v_img * scale_v
 
             # 1. Forward distance (depth) + geometric lateral seed
             if depth_map is not None and depth_estimator is not None:
@@ -217,19 +242,50 @@ class CIPOTracker:
                 }
                 seen_ids.add(track_id)
 
-            # 4. In-path / CIPO from 2D lane association (camera space)
+            # 4. In-path / CIPO from 2D lane association + lateral X gate (P1)
+            u_margin = cfg.CIPO_U_MARGIN_PX
             u_left_2d = self.get_2d_lane_u_at_v(ego_left, v_model) if ego_left is not None else None
             u_right_2d = self.get_2d_lane_u_at_v(ego_right, v_model) if ego_right is not None else None
 
-            is_left_of_left_lane = (u_left_2d is not None) and (u_model < u_left_2d - 3.0)
-            is_right_of_right_lane = (u_right_2d is not None) and (u_model > u_right_2d + 3.0)
-
-            if is_left_of_left_lane or is_right_of_right_lane:
-                in_path = False
+            raw_in = False
+            if not road_state_confirmed:
+                # A stale/unknown road model may be rendered as degraded, but
+                # must not create a new in-path safety assertion.
+                raw_in = False
             elif u_left_2d is not None and u_right_2d is not None:
-                in_path = (u_left_2d - 3.0) <= u_model <= (u_right_2d + 3.0)
+                raw_in = (u_left_2d - u_margin) <= u_model <= (u_right_2d + u_margin)
+            elif u_left_2d is not None:
+                raw_in = u_model >= (u_left_2d - u_margin) and abs(X_3d) <= 2.0
+            elif u_right_2d is not None:
+                raw_in = u_model <= (u_right_2d + u_margin) and abs(X_3d) <= 2.0
             else:
-                in_path = abs(X_3d) <= 1.50
+                raw_in = abs(X_3d) <= 1.50
+
+            # Lateral X gate from measured ego width (rejects adjacent-lane FPs)
+            if raw_in and ego_left is not None and ego_right is not None:
+                gap = pair_gap_m(ego_left, ego_right, ANCHOR_LEN)
+                half = (0.5 * gap) if gap is not None else 1.85
+                if abs(X_3d) > half + cfg.CIPO_X_MARGIN_M:
+                    raw_in = False
+
+            # Hysteresis per track_id (and anonymous boxes keyed by rounded bbox)
+            state_key = track_id if track_id > 0 else f"anon_{int(u_img)}_{int(v_img)}"
+            st = self._inpath_state.get(state_key)
+            if st is None:
+                st = {"in_path": False, "hits": 0, "miss": 0}
+            if raw_in:
+                st["hits"] += 1
+                st["miss"] = 0
+                if st["hits"] >= cfg.CIPO_ENTER_HITS or st["in_path"]:
+                    st["in_path"] = True
+            else:
+                st["miss"] += 1
+                st["hits"] = 0
+                if st["miss"] >= cfg.CIPO_EXIT_MISS:
+                    st["in_path"] = False
+            st["last_frame"] = self._hist_frame
+            self._inpath_state[state_key] = st
+            in_path = bool(st["in_path"])
 
             if not in_path:
                 status = "OUT OF PATH"
@@ -270,5 +326,16 @@ class CIPOTracker:
         ]
         for tid in stale:
             self.track_history.pop(tid, None)
+        # Keep hysteresis through short detector misses.  Removing all state
+        # whenever one frame has no box defeated the configured exit hysteresis.
+        self._inpath_state = {
+            k: v for k, v in self._inpath_state.items()
+            if int(v.get("last_frame", 0)) >= self._hist_frame - self._hist_ttl
+        }
 
-        return processed_objects, None
+        cipo_obj = None
+        if road_state_confirmed:
+            in_path = [obj for obj in processed_objects if obj["in_path"]]
+            if in_path:
+                cipo_obj = min(in_path, key=lambda obj: obj["Z_3d"])
+        return processed_objects, cipo_obj

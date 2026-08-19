@@ -30,3 +30,23 @@ EKF_MAX_MISSED_FRAMES = 5      # was 10; drop ghost tracks sooner
 EKF_DIST_THRESHOLD_M = 1.8     # was 2.5; tighter association
 EKF_CONFIRM_HITS = 5           # was 2–3; only draw after this many matches
 EKF_REQUIRE_CONFIRMED = True   # if True, never draw unconfirmed tracks
+
+# --- Ego corridor / P0 lane-pair (ADAS) ---
+EGO_LANE_WIDTH_MIN_M = 2.8     # reject pairs narrower than a real lane
+# Model-space lane width has centimetre-level frame variation; leave a small
+# acceptance margin above the nominal 4.6 m limit without admitting 2 lanes.
+EGO_LANE_WIDTH_MAX_M = 4.8     # reject pairs that span 2+ lanes
+EGO_LANE_WIDTH_TARGET_M = 3.7  # prefer pairs near standard lane width
+EGO_CORRIDOR_MARGIN_M = 0.12   # light inset so red fill matches ego lane width in BEV/front
+EGO_PAIR_HOLD_FRAMES = 8       # keep last good pair during lane-change gaps
+EGO_PAIR_MATCH_X_M = 1.25      # rematch held lanes to new proposals by |Δmean_x|
+
+# --- Corridor temporal EMA (P2) ---
+CORRIDOR_EMA_ALPHA = 0.35      # higher = trust new frame more
+CORRIDOR_EMA_MAX_JUMP_M = 1.8  # reject / hard-switch if lateral jump exceeds this
+
+# --- CIPO / P1 in-path hysteresis ---
+CIPO_ENTER_HITS = 2            # frames inside before marking in_path
+CIPO_EXIT_MISS = 4             # frames outside before clearing in_path
+CIPO_U_MARGIN_PX = 3.0         # pixel slack around projected ego lines
+CIPO_X_MARGIN_M = 0.35         # extra meters beyond measured ego half-width

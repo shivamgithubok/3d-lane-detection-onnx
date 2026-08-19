@@ -9,10 +9,12 @@ from PySide6.QtWidgets import (
 class CalibrationPanel(QWidget):
     calibration_changed = Signal(float, float)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, pitch_deg=-7.0, height_m=1.0):
         super().__init__(parent)
-        self.pitch_deg = -7.0
-        self.height_m = 1.0
+        self.pitch_deg = float(pitch_deg)
+        self.height_m = float(height_m)
+        self._default_pitch = self.pitch_deg
+        self._default_height = self.height_m
         self.setMaximumHeight(36)
         self.init_ui()
 
@@ -41,7 +43,7 @@ class CalibrationPanel(QWidget):
 
         row.addWidget(QLabel("Pitch"))
         self.slider_pitch = QSlider(Qt.Horizontal)
-        self.slider_pitch.setRange(-100, 100)
+        self.slider_pitch.setRange(-120, 20)
         self.slider_pitch.setValue(int(self.pitch_deg * 10))
         self.slider_pitch.setMaximumWidth(140)
         self.lbl_pitch = QLabel(f"{self.pitch_deg:.1f}°")
@@ -62,7 +64,7 @@ class CalibrationPanel(QWidget):
         row.addWidget(self.lbl_height)
 
         btn_reset = QPushButton("Reset")
-        btn_reset.setToolTip("Reset extrinsics")
+        btn_reset.setToolTip("Reset to OpenLane extrinsics (−3° / 1.5 m). Live retune is locked.")
         btn_reset.clicked.connect(self.reset_defaults)
         row.addWidget(btn_reset)
         row.addStretch()
@@ -75,5 +77,5 @@ class CalibrationPanel(QWidget):
         self.calibration_changed.emit(self.pitch_deg, self.height_m)
 
     def reset_defaults(self):
-        self.slider_pitch.setValue(-70)
-        self.slider_height.setValue(10)
+        self.slider_pitch.setValue(int(self._default_pitch * 10))
+        self.slider_height.setValue(int(self._default_height * 10))

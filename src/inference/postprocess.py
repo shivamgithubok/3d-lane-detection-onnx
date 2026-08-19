@@ -138,7 +138,13 @@ def _projective_transformation(P, x, y, z):
     return u, v
 
 
-def decode_lane_pixels(proposal, P_matrix):
+def decode_lane_pixels(proposal, P_matrix, flat_ground=False):
+    """
+    Project a 3D lane proposal into model-space pixels (480x360).
+
+    flat_ground=True forces Z=0 (same ground-plane style as BEV), which
+    removes wavy/floating height noise in the front-camera overlay.
+    """
     if isinstance(proposal, np.ndarray) and proposal.ndim == 2 and proposal.shape[1] == 3:
         xs = proposal[:, 0].astype(np.float64)
         ys = proposal[:, 1].astype(np.float64)
@@ -155,6 +161,9 @@ def decode_lane_pixels(proposal, P_matrix):
 
     if len(xs) < 2:
         return []
+
+    if flat_ground:
+        zs = np.zeros_like(xs)
 
     u, v = _projective_transformation(P_matrix, xs, ys, zs)
     return list(zip(u, v))

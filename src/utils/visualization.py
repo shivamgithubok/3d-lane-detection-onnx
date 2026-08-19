@@ -17,7 +17,15 @@ def world_to_canvas(x, y):
     py = int(BEV_HEIGHT - (y - Y_RANGE[0]) / (Y_RANGE[1] - Y_RANGE[0]) * (BEV_HEIGHT - 60) - 40)
     return px, py
 
-def draw_bev(proposals, anchor_y_steps, anchor_len=20, cipo_status="SAFE"):
+def draw_bev(
+    proposals,
+    anchor_y_steps,
+    anchor_len=20,
+    cipo_status="SAFE",
+    left_corridor_3d=None,
+    right_corridor_3d=None,
+    allow_auto_corridor=True,
+):
     """
     Renders a clean, realistic top-down Bird's Eye View (BEV) map with drivable corridor and 2px lane lines.
     """
@@ -30,7 +38,10 @@ def draw_bev(proposals, anchor_y_steps, anchor_len=20, cipo_status="SAFE"):
     cv2.rectangle(canvas, (left_road_x, 0), (right_road_x, BEV_HEIGHT), (30, 35, 43), -1)
 
     # 3. Draw Drivable Area Corridor Polygon (Green for Safe / Red for Danger)
-    left_3d, right_3d = extract_ego_corridor_3d(proposals, anchor_len)
+    if left_corridor_3d is None and right_corridor_3d is None and allow_auto_corridor:
+        left_3d, right_3d = extract_ego_corridor_3d(proposals, anchor_len)
+    else:
+        left_3d, right_3d = left_corridor_3d, right_corridor_3d
     if left_3d is not None and right_3d is not None:
         pts_left_bev = [world_to_canvas(x, y) for x, y, _ in left_3d]
         pts_right_bev = [world_to_canvas(x, y) for x, y, _ in right_3d]
