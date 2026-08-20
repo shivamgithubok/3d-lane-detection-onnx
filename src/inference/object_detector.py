@@ -12,6 +12,37 @@ VEHICLE_CLASSES = {
 
 _TRACKER_YAML = os.path.join(os.path.dirname(__file__), "bytetrack_lowfps.yaml")
 
+# YOLO-only: hide Garmin HUD + ego hood. Lanes still use the full frame.
+YOLO_BOTTOM_DROP_FRAC = 0.12
+
+
+def _yolo_view(frame, drop_frac=YOLO_BOTTOM_DROP_FRAC):
+    """Top crop so YOLO never sees the bonnet. Box xyxy stays in full-frame coords."""
+    h, w = frame.shape[:2]
+    drop = int(round(h * drop_frac))
+    keep_h = max(1, h - drop)
+    if keep_h >= h:
+        return frame, h, w
+    return frame[:keep_h], h, w
+
+
+def _is_ego_hood_box(bbox, frame_w, frame_h):
+    """Wide, short, bottom-glued box = own hood, not traffic."""
+    x1, y1, x2, y2 = bbox
+    bw = max(1, x2 - x1)
+    bh = max(1, y2 - y1)
+    cx = 0.5 * (x1 + x2)
+    glued_bottom = y2 >= 0.88 * frame_h
+    starts_low = y1 >= 0.55 * frame_h
+    very_wide = bw >= 0.40 * frame_w
+    flat = bh <= 0.35 * frame_h
+    centered = abs(cx - 0.5 * frame_w) <= 0.35 * frame_w
+    return glued_bottom and starts_low and very_wide and flat and centered
+
+
+def _drop_ego_hood(detections, frame_w, frame_h):
+    return [d for d in detections if not _is_ego_hood_box(d["bbox"], frame_w, frame_h)]
+
 
 def _iou(a, b):
     ax1, ay1, ax2, ay2 = a
@@ -34,6 +65,7 @@ class OfflineYOLOVehicleDetector:
 
     P0: never emit a hard-empty frame on a miss/error — coast last tracks.
     P1: imgsz=640, car/moto/bus/truck, low-FPS ByteTrack, IoU ID recovery.
+    YOLO runs on a bottom-cropped view (HUD + ego hood hidden). Lane crop is unchanged.
     """
 
     def __init__(
@@ -155,9 +187,10 @@ class OfflineYOLOVehicleDetector:
             return []
 
         try:
+            yolo_frame, full_h, full_w = _yolo_view(frame)
             tracker = _TRACKER_YAML if os.path.isfile(_TRACKER_YAML) else "bytetrack.yaml"
             results = self.model.track(
-                frame,
+                yolo_frame,
                 persist=True,
                 imgsz=self.imgsz,
                 tracker=tracker,
@@ -166,7 +199,11 @@ class OfflineYOLOVehicleDetector:
                 conf=self.conf_thresh,
                 iou=0.50,
             )[0]
-            detections = self._recover_ids(self._parse_results(results))
+            detections = _drop_ego_hood(
+                self._recover_ids(self._parse_results(results)),
+                full_w,
+                full_h,
+            )
             if detections:
                 self._last_dets = detections
                 self._coast_frames = 0

@@ -24,7 +24,7 @@ K = np.array([[2015.0, 0.0, 960.0],
 # Do NOT retune pitch for Garmin via P — 3D lane outputs assume this camera.
 # Garmin domain gap is handled by HUD crop + ego-pair logic, not extrinsics hacks.
 CAM_HEIGHT = 1.5       # meters
-CAM_PITCH_DEG = -3.0   # degrees
+CAM_PITCH_DEG = -3   # degrees
 
 OPENLANE_CAM_HEIGHT = CAM_HEIGHT
 OPENLANE_CAM_PITCH_DEG = CAM_PITCH_DEG
