@@ -35,7 +35,7 @@ class LaneTrackerManager:
         diff_x = np.abs(tracker_pts[:, 0] - proposal_pts[:, 0])
         return np.mean(diff_x)
 
-    def update(self, detected_proposals, dt=0.033):
+    def update(self, detected_proposals, dt=0.033, speed_mps=None):
         """
         Update all EKF trackers with new detected proposals.
         Returns list of confirmed smoothed 3D lane proposals.
@@ -88,6 +88,11 @@ class LaneTrackerManager:
                 cost_matrix[trk_idx, :] = 1e6
                 cost_matrix[:, prop_idx] = 1e6
 
+        # Coast unmatched tracks with HUD speed (miss only — not on live paint)
+        for i, trk in enumerate(self.trackers):
+            if i not in matched_trackers:
+                trk.apply_ego_coast(dt, speed_mps)
+
         for j in range(num_proposals):
             if j not in matched_proposals:
                 new_trk = EKFLaneTracker(
@@ -105,7 +110,7 @@ class LaneTrackerManager:
             if self.require_confirmed:
                 if trk.is_confirmed:
                     smoothed_lanes.append(trk.get_lane_points(ANCHOR_Y_STEPS))
-            elif trk.is_confirmed or trk.hits >= max(2, self.confirm_hits // 2):
+            elif trk.is_confirmed or trk.hits >= max(1, self.confirm_hits // 2):
                 smoothed_lanes.append(trk.get_lane_points(ANCHOR_Y_STEPS))
 
         return smoothed_lanes

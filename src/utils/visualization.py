@@ -48,8 +48,12 @@ def draw_bev(
         poly_bev = np.array(pts_left_bev + pts_right_bev[::-1], dtype=np.int32)
 
         overlay = canvas.copy()
-        # Dynamic corridor color: Red for DANGER (<15m), Green (0, 255, 128) for SAFE
-        corridor_color = (0, 30, 220) if cipo_status == "DANGER" else (0, 255, 128)
+        if cipo_status == "DANGER":
+            corridor_color = (70, 40, 255)
+        elif cipo_status == "WARNING":
+            corridor_color = (0, 165, 255)
+        else:
+            corridor_color = (255, 190, 80)
         cv2.fillPoly(overlay, [poly_bev], corridor_color)
         cv2.addWeighted(overlay, 0.35, canvas, 0.65, 0, canvas)
 

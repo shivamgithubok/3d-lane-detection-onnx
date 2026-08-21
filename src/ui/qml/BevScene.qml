@@ -24,10 +24,10 @@ Item {
     property real cipoZ: -12
     property real cipoDist: 0
     readonly property color cipoGlow: cipoStatus === "DANGER" ? "#e23a3c"
-                                     : (cipoStatus === "WARNING" ? "#e09a20" : "#2ecc71")
-    readonly property color corridorColor: cipoStatus === "DANGER" ? Qt.rgba(0.86, 0.18, 0.18, 0.42)
-                                     : (cipoStatus === "WARNING" ? Qt.rgba(0.86, 0.58, 0.08, 0.40)
-                                                                 : Qt.rgba(0.18, 0.86, 0.44, 0.38))
+                                     : (cipoStatus === "WARNING" ? "#e09a20" : "#3ec8ff")
+    readonly property color corridorColor: cipoStatus === "DANGER" ? Qt.rgba(0.95, 0.18, 0.32, 0.42)
+                                     : (cipoStatus === "WARNING" ? Qt.rgba(1.0, 0.62, 0.08, 0.40)
+                                                                 : Qt.rgba(0.25, 0.78, 1.0, 0.40))
     property string overlayHint: "Phase 2 — loading GLB"
     property url egoGltf: ""
     property url skodaGltf: ""
@@ -374,7 +374,7 @@ Item {
                 source: "#Cube"
                 materials: PrincipledMaterial {
                     lighting: PrincipledMaterial.NoLighting
-                    baseColor: pal === 1 ? "#ffbe00" : (pal === 2 ? "#00ffb4" : "#78dcff")
+                    baseColor: pal === 1 ? "#b89440" : (pal === 2 ? "#7aa8b4" : "#78dcff")
                 }
             }
         }

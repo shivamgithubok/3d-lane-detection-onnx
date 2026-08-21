@@ -60,19 +60,47 @@ class EKFLaneTracker:
         self.R_std_x = 0.3 # meters
         self.R_std_z = 0.2 # meters
 
-    def predict(self, dt=0.033):
-        """Predict state forward by dt seconds."""
-        # State transition matrix F
-        F = np.eye(8, dtype=np.float64)
-        F[0, 4] = dt # a0_k = a0_{k-1} + a0_dot * dt
+    def predict(self, dt=0.033, speed_mps=None):
+        """Predict state forward by dt seconds (a0_dot only).
 
+        HUD ego-speed is applied later via apply_ego_coast() on unmatched
+        tracks only. Detections are already in the current vehicle frame, so
+        shifting every track by v*dt double-counts motion and breaks association.
+        """
+        dt = float(dt)
+        F = np.eye(8, dtype=np.float64)
+        F[0, 4] = dt
         self.x = F @ self.x
-        
         Q = self.Q_base * dt
         self.P = F @ self.P @ F.T + Q
         self.age += 1
         self.misses += 1
         return self.x
+
+    def apply_ego_coast(self, dt, speed_mps):
+        """Shift the polynomial along Y after a miss: ds = v * dt."""
+        if speed_mps is None or float(speed_mps) <= 0.5:
+            return
+        ds = float(speed_mps) * float(dt)
+        if ds <= 0.0:
+            return
+        a0, a1, a2, a3, a0d, b0, b1, b2 = self.x
+        ds2, ds3 = ds * ds, ds * ds * ds
+        self.x = np.array(
+            [
+                a0 + a1 * ds + a2 * ds2 + a3 * ds3,
+                a1 + 2.0 * a2 * ds + 3.0 * a3 * ds2,
+                a2 + 3.0 * a3 * ds,
+                a3,
+                a0d,
+                b0 + b1 * ds + b2 * ds2,
+                b1 + 2.0 * b2 * ds,
+                b2,
+            ],
+            dtype=np.float64,
+        )
+        # Extra process noise: coasting is less certain than a measurement
+        self.P = self.P + np.diag([1e-2, 2e-3, 2e-5, 2e-6, 0.0, 5e-3, 1e-3, 1e-5])
 
     def update(self, points_3d, confirm_hits=None):
         """Update state using observed 3D points (N x 3: X, Y, Z)."""

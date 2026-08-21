@@ -13,12 +13,14 @@ import os
 import time
 from PySide6.QtCore import QThread, Signal
 from src.inference.postprocess import postprocess_onnx_output
+from src.inference.lane_preprocess import prepare_lane_input
 from src.inference.cipo_tracker import CIPOTracker
 from src.inference.trt_depth_estimator import TRTMonocularDepthEstimator
 from src.inference.object_detector import OfflineYOLOVehicleDetector
 from src.utils.split_visualization import draw_front_view_cipo
 from src.utils.camera_transform import CameraTransform
 from src.tracking.road_state import RoadStateEstimator
+from src.utils.ego_speed import EgoSpeedLog
 from src.utils.calibration import (
     make_P_matrix,
     preset_for_video,
@@ -26,20 +28,13 @@ from src.utils.calibration import (
     OPENLANE_CAM_HEIGHT,
 )
 
-IMG_NORM_MEAN = np.array([123.675, 116.28, 103.53], dtype=np.float32)
-IMG_NORM_STD  = np.array([58.395, 57.12, 57.375], dtype=np.float32)
 INPUT_H, INPUT_W = 360, 480
 
 def preprocess_frame(frame):
     frame_transform = CameraTransform.for_frame(frame, (INPUT_W, INPUT_H))
     resized = frame_transform.apply(frame)
-    img = resized[:, :, ::-1].astype(np.float32)
-    img = (img - IMG_NORM_MEAN) / IMG_NORM_STD
-    img = img.transpose(2, 0, 1)[None, ...].astype(np.float32)
-    img = np.ascontiguousarray(img)
-    mask = np.zeros((1, 1, INPUT_H, INPUT_W), dtype=np.float32)
-    mask = np.ascontiguousarray(mask)
-    return img, mask, resized, frame_transform
+    img, mask, meta = prepare_lane_input(resized)
+    return img, mask, resized, frame_transform, meta
 
 class InferenceWorker(QThread):
     # Signal emitted to UI: frame_rgb, proposals, processed_objs, cipo_obj, cipo_status, left_3d, right_3d, avg_fps, latency_ms
@@ -84,6 +79,9 @@ class InferenceWorker(QThread):
         tracker = None
         detector = None
         road_state_estimator = RoadStateEstimator()
+        speed_log = EgoSpeedLog.auto_load(self.video_path) if self.video_path else None
+        if speed_log is not None:
+            self.status_message.emit(f"Loaded ego speed JSON ({len(speed_log.mps)} frames)")
 
         # Initialize CUDA Context & Triple TensorRT Engines
         if os.path.exists(self.engine_path):
@@ -205,7 +203,7 @@ class InferenceWorker(QThread):
 
                 if frame is not None and use_trt:
                     # Step A: 3D Lane TensorRT Inference
-                    img_tensor, mask_tensor, _, frame_transform = preprocess_frame(frame)
+                    img_tensor, mask_tensor, _, frame_transform, prep_meta = preprocess_frame(frame)
                     cuda.memcpy_htod_async(d_img, img_tensor, stream)
                     cuda.memcpy_htod_async(d_mask, mask_tensor, stream)
 
@@ -215,8 +213,13 @@ class InferenceWorker(QThread):
                     cuda.memcpy_dtoh_async(h_anchors, d_anchors, stream)
                     stream.synchronize()
 
-                    raw_proposals, scores = postprocess_onnx_output(h_reg_proposals)
-                    road_state = road_state_estimator.update(raw_proposals, dt=source_dt)
+                    raw_proposals, scores = postprocess_onnx_output(
+                        h_reg_proposals, conf_threshold=prep_meta["conf"]
+                    )
+                    speed_mps = speed_log.get_mps(frame_i) if speed_log is not None else None
+                    road_state = road_state_estimator.update(
+                        raw_proposals, dt=source_dt, speed_mps=speed_mps
+                    )
                     # Render immediate measurements while tracks acquire; only
                     # confirmed/predicted tracks may feed CIPO safety logic.
                     proposals = road_state.visual_lanes

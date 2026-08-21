@@ -30,7 +30,7 @@ def _configure_quick3d_graphics():
 
 def main():
     parser = argparse.ArgumentParser(description="PySide6 ADAS & 3D BEV Visualization Dashboard")
-    parser.add_argument("--video", type=str, default="data/images/example_3.mp4", help="Path to input video file")
+    parser.add_argument("--video", type=str, default="testing_new_videos/GRMN6694_540_nohud.mp4", help="Path to input video file")
     parser.add_argument("--model", type=str, default="models/anchor3dlane_raw.engine", help="Path to TensorRT engine")
     parser.add_argument(
         "--bev",

@@ -10,31 +10,26 @@ import pycuda.autoinit
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.inference.postprocess import postprocess_onnx_output, decode_lane_pixels
+from src.inference.lane_preprocess import prepare_lane_input
 from src.inference.cipo_tracker import CIPOTracker, DEFAULT_P_MATRIX
 from src.inference.object_detector import OfflineYOLOVehicleDetector
 from src.inference.trt_depth_estimator import TRTMonocularDepthEstimator
 from src.utils.split_visualization import draw_bev_cipo, draw_front_view_cipo, create_split_window
 from src.utils.camera_transform import CameraTransform
 from src.tracking.road_state import RoadStateEstimator
+from src.utils.ego_speed import EgoSpeedLog
 
 ENGINE_PATH = "models/anchor3dlane_raw.engine"
 DEFAULT_VIDEO_PATH = "data/images/example_3.mp4"
 OUTPUT_VIDEO_PATH = "output/example_3_futuristic_adas.mp4"
 
-IMG_NORM_MEAN = np.array([123.675, 116.28, 103.53], dtype=np.float32)
-IMG_NORM_STD  = np.array([58.395, 57.12, 57.375], dtype=np.float32)
 INPUT_H, INPUT_W = 360, 480
 
 def preprocess(frame):
     frame_transform = CameraTransform.for_frame(frame, (INPUT_W, INPUT_H))
     resized = frame_transform.apply(frame)
-    img = resized[:, :, ::-1].astype(np.float32)
-    img = (img - IMG_NORM_MEAN) / IMG_NORM_STD
-    img = img.transpose(2, 0, 1)[None, ...].astype(np.float32)
-    img = np.ascontiguousarray(img)
-    mask = np.zeros((1, 1, INPUT_H, INPUT_W), dtype=np.float32)
-    mask = np.ascontiguousarray(mask)
-    return img, mask, resized, frame_transform
+    img, mask, meta = prepare_lane_input(resized)
+    return img, mask, resized, frame_transform, meta
 
 def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PATH, show_gui=True, max_frames=None, show_drivable=True):
     if not os.path.exists(video_path):
@@ -83,6 +78,9 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
     depth_estimator = TRTMonocularDepthEstimator("models/monocular_depth.engine")
     tracker = CIPOTracker(P_matrix=DEFAULT_P_MATRIX, danger_dist=15.0, warning_dist=30.0)
     road_state_estimator = RoadStateEstimator()
+    speed_log = EgoSpeedLog.auto_load(video_path)
+    if speed_log is not None:
+        print(f"[Speed] Loaded HUD JSON ({len(speed_log.mps)} frames)")
 
     # 3. Open Video Source
     print(f"[Video] Opening video source: {video_path}")
@@ -119,7 +117,7 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
         t0 = time.time()
 
         # Step A: Preprocess Frame for 3D Lane Model
-        img_tensor, mask_tensor, resized_frame, frame_transform = preprocess(frame)
+        img_tensor, mask_tensor, resized_frame, frame_transform, prep_meta = preprocess(frame)
 
         # Step B: TensorRT GPU Inference for 3D Lanes
         cuda.memcpy_htod_async(d_img, img_tensor, stream)
@@ -130,8 +128,13 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
         stream.synchronize()
 
         # Step C: Decode 3D Lane Proposals
-        raw_lane_proposals, lane_scores = postprocess_onnx_output(h_reg_proposals)
-        road_state = road_state_estimator.update(raw_lane_proposals, dt=1.0 / source_fps)
+        raw_lane_proposals, lane_scores = postprocess_onnx_output(
+            h_reg_proposals, conf_threshold=prep_meta["conf"]
+        )
+        speed_mps = speed_log.get_mps(frame_idx - 1) if speed_log is not None else None
+        road_state = road_state_estimator.update(
+            raw_lane_proposals, dt=1.0 / source_fps, speed_mps=speed_mps
+        )
         visual_lanes = road_state.visual_lanes
 
         # Step D: YOLO (release pycuda ctx so Ultralytics TRT can run) + depth

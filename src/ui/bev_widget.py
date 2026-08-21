@@ -733,13 +733,13 @@ class BEVWidget(QWidget):
                         corridor_poly = QPolygonF(pts_left + pts_right[::-1])
                         if self.cinematic_road:
                             corridor_color = (
-                                QColor(220, 40, 50, 55) if self.cipo_status == "DANGER"
-                                else QColor(40, 200, 120, 45)
+                                QColor(220, 40, 70, 55) if self.cipo_status == "DANGER"
+                                else QColor(40, 180, 255, 50)
                             )
                         else:
                             corridor_color = (
-                                QColor(220, 30, 30, 85) if self.cipo_status == "DANGER"
-                                else QColor(0, 220, 100, 75)
+                                QColor(230, 40, 70, 85) if self.cipo_status == "DANGER"
+                                else QColor(40, 190, 255, 80)
                             )
                         painter.setBrush(QBrush(corridor_color))
                         painter.setPen(QPen(corridor_color.lighter(130), 1.0, Qt.SolidLine))

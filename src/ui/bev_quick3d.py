@@ -32,6 +32,7 @@ from src.ui.car_assets import (
     asset_url,
 )
 from src.utils.drivable_area import find_ego_lanes, find_outer_lanes, parse_lane_components
+from src.inference import lane_filter_config as cfg
 
 # Local copies — do not import bev_widget (QPainter + sprite pipeline).
 BEV_MAX_DIST_M = 60.0
@@ -174,13 +175,15 @@ class BevQuick3DWidget(QQuickWidget):
             return float(xs[-1])
         return float(np.interp(y_target, ys, xs))
 
-    def _corridor_polylines(self, left_3d, right_3d, y_start=2.0):
+    def _corridor_polylines(self, left_3d, right_3d, y_start=None):
         if left_3d is None or right_3d is None:
             return None, None
         left = np.asarray(left_3d, dtype=np.float64)
         right = np.asarray(right_3d, dtype=np.float64)
         if left.ndim != 2 or right.ndim != 2 or len(left) < 2 or len(right) < 2:
             return None, None
+        if y_start is None:
+            y_start = float(getattr(cfg, "CORRIDOR_Y_START_M", 4.0))
         x_l0 = self._interp_x_at_y(left, y_start)
         x_r0 = self._interp_x_at_y(right, y_start)
         if x_l0 is None or x_r0 is None:
@@ -297,7 +300,10 @@ class BevQuick3DWidget(QQuickWidget):
         rows = []
         if not proposals:
             return rows
-        ego_left, ego_right = find_ego_lanes(proposals)
+        try:
+            ego_left, ego_right = find_ego_lanes(proposals)
+        except Exception:
+            ego_left, ego_right = None, None
         for lane in (ego_left, ego_right):
             if lane is None:
                 continue
@@ -353,7 +359,7 @@ class BevQuick3DWidget(QQuickWidget):
         return rows[:24]
 
     @staticmethod
-    def _ribbon_segments(xy, pal, max_segs=12):
+    def _ribbon_segments(xy, pal, max_segs=12, width=0.16):
         if len(xy) < 2:
             return []
         n = len(xy)
@@ -375,7 +381,7 @@ class BevQuick3DWidget(QQuickWidget):
                 "z": round(-0.5 * (y0 + y1), 2),
                 "yaw": round(yaw, 1),
                 "len": round(length, 2),
-                "w": 0.16,
+                "w": round(float(width), 2),
                 "c": pal,
             })
             i += step
@@ -391,10 +397,12 @@ class BevQuick3DWidget(QQuickWidget):
         rows = []
         if not proposals:
             return rows
-        n_lane = 0
+        try:
+            ego_left, ego_right = find_ego_lanes(proposals)
+        except Exception:
+            ego_left, ego_right = None, None
+        ranked = []
         for lane in proposals:
-            if n_lane >= 6:
-                break
             try:
                 xs, ys, zs, vis = parse_lane_components(lane)
             except Exception:
@@ -404,20 +412,35 @@ class BevQuick3DWidget(QQuickWidget):
             xy = self._visible_xy(xs, ys, vis)
             if len(xy) < 2:
                 continue
-            mean_x = float(np.mean([p[0] for p in xy]))
-            if abs(mean_x) > 7.5:
+            mx = float(np.mean([p[0] for p in xy]))
+            ranked.append((mx, lane, xy))
+        ranked.sort(key=lambda t: t[0])
+
+        ego_l_idx = ego_r_idx = None
+        for idx, (mx, lane, xy) in enumerate(ranked):
+            if ego_left is not None and np.array_equal(lane, ego_left):
+                ego_l_idx = idx
+            if ego_right is not None and np.array_equal(lane, ego_right):
+                ego_r_idx = idx
+
+        for idx, (mx, lane, xy) in enumerate(ranked):
+            is_ego = (idx == ego_l_idx) or (idx == ego_r_idx)
+            is_adj = (
+                (ego_l_idx is not None and idx == ego_l_idx - 1)
+                or (ego_r_idx is not None and idx == ego_r_idx + 1)
+            )
+            if not is_ego and not is_adj:
                 continue
-            if abs(mean_x) < 2.2:
-                pal = 0
-            elif mean_x < 0:
-                pal = 1
+            if is_ego:
+                pal, width = 0, 0.20
+            elif mx < 0:
+                pal, width = 1, 0.07
             else:
-                pal = 2
-            segs = self._ribbon_segments(xy, pal)
+                pal, width = 2, 0.07
+            segs = self._ribbon_segments(xy, pal, width=width)
             if not segs:
                 continue
             rows.extend(segs)
-            n_lane += 1
             if len(rows) >= 36:
                 break
         return rows[:36]

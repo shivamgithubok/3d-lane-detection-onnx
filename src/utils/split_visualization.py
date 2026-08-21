@@ -6,7 +6,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from src.utils.visualization import draw_bev
 from src.inference.postprocess import ANCHOR_Y_STEPS, decode_lane_pixels
-from src.utils.drivable_area import extract_ego_corridor_3d, get_ego_corridor_2d_pixels, fill_missing_lane_gaps, find_ego_lanes
+from src.utils.drivable_area import extract_ego_corridor_3d, get_ego_corridor_2d_pixels, get_ego_corridor_sides_2d, fill_missing_lane_gaps, find_ego_lanes
 from src.utils.draw_3d_box import draw_3d_wireframe_box
 
 
@@ -130,7 +130,7 @@ def draw_futuristic_corner_bbox(img, pt1, pt2, color, thickness=1, corner_len=14
 
 ANCHOR_LEN = 20
 
-from src.utils.drivable_area import extract_ego_corridor_3d, get_ego_corridor_2d_pixels, fill_missing_lane_gaps, find_ego_lanes, parse_lane_components
+from src.utils.drivable_area import extract_ego_corridor_3d, get_ego_corridor_2d_pixels, get_ego_corridor_sides_2d, fill_missing_lane_gaps, find_ego_lanes, parse_lane_components
 
 
 def _get_lane_mean_x(lane, anchor_len=ANCHOR_LEN):
@@ -138,6 +138,32 @@ def _get_lane_mean_x(lane, anchor_len=ANCHOR_LEN):
         return 0.0
     xs, ys, zs, vis = parse_lane_components(lane, anchor_len)
     return float(np.mean(xs[vis])) if vis.sum() >= 2 else 0.0
+
+
+def _lerp_bgr(a, b, t):
+    t = max(0.0, min(1.0, float(t)))
+    return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
+
+
+def _fill_corridor_gradient(overlay, left_pts, right_pts, danger=False, warning=False):
+    """Banded fill: cyan→violet (safe), amber→orange (warn), magenta→red (danger)."""
+    n = min(len(left_pts), len(right_pts))
+    if n < 2:
+        return
+    if danger:
+        far_c, near_c = (90, 20, 140), (70, 40, 255)
+    elif warning:
+        far_c, near_c = (40, 90, 210), (0, 165, 255)
+    else:
+        far_c, near_c = (200, 70, 170), (255, 210, 60)
+    for i in range(n - 1):
+        t = i / max(1, n - 2)
+        color = _lerp_bgr(far_c, near_c, t)
+        quad = np.array(
+            [left_pts[i], left_pts[i + 1], right_pts[i + 1], right_pts[i]],
+            dtype=np.int32,
+        )
+        cv2.fillConvexPoly(overlay, quad, color)
 
 
 def _draw_lane_line(img, pts, color, thickness):
@@ -167,7 +193,7 @@ def draw_front_view_cipo(
 ):
     """
     Renders front camera view with ultra-fast single-pass overlay blending:
-      - Translucent Green Drivable Corridor (left/right symmetric inset from ego lanes)
+      - Translucent cyan→violet drivable corridor (margin inset; clipped above hood)
       - 3D lane polylines projected with full P_matrix (model Z kept — calibrated look)
       - Professional 2D detection boxes with ID/class/distance label chips
     """
@@ -187,10 +213,11 @@ def draw_front_view_cipo(
     in_path_objs     = [obj for obj in objects if obj['in_path']]
     min_dist_in_path = min([obj['Z_3d'] for obj in in_path_objs]) if in_path_objs else 999.0
     danger           = min_dist_in_path < 15.0
+    warning          = 15.0 <= min_dist_in_path < 30.0
 
     # ── 1. Drivable area corridor fill (on overlay) ──────────────────────
     if show_drivable and road_state_valid and proposals is not None:
-        poly_2d = get_ego_corridor_2d_pixels(
+        sides = get_ego_corridor_sides_2d(
             proposals, P_matrix,
             img_size=(480, 360), target_size=(w_img, h_img),
             ego_left=ego_left, ego_right=ego_right,
@@ -198,9 +225,8 @@ def draw_front_view_cipo(
             left_corridor_3d=left_corridor_3d,
             right_corridor_3d=right_corridor_3d,
         )
-        if poly_2d is not None and len(poly_2d) > 2:
-            corridor_color = (0, 30, 255) if danger else (0, 220, 100)
-            cv2.fillPoly(overlay, [poly_2d], corridor_color)
+        if sides is not None:
+            _fill_corridor_gradient(overlay, sides[0], sides[1], danger=danger, warning=warning)
 
     # ── 2. Detection box fills & chips (on overlay & annotated) ───────────
     for obj in objects:
@@ -242,16 +268,11 @@ def draw_front_view_cipo(
                 (ego_l_idx is not None and idx == ego_l_idx - 1)
                 or (ego_r_idx is not None and idx == ego_r_idx + 1)
             )
-            if not is_ego and not is_adj:
-                # still draw farther lanes thinner
-                mean_x = _get_lane_mean_x(lane)
-                if abs(mean_x) > 6.0:
-                    continue
-                lane_color, thickness = (120, 160, 200), 1
-            elif is_ego:
-                lane_color, thickness = (255, 180, 0), 2  # BEV ego cyan/orange
-            else:
-                lane_color, thickness = (0, 215, 255), 2
+            # Hide cyan ego polylines — corridor fill already shows the ego path.
+            # Keep adjacent lanes live so next-lane context stays dynamic.
+            if not is_adj:
+                continue
+            lane_color, thickness = (60, 150, 210), 1
 
             # flat_ground=False → keep calibrated height (do not zero Z)
             pts = decode_lane_pixels(lane, P_matrix, flat_ground=False)
