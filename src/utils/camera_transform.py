@@ -1,10 +1,31 @@
 """One source of truth for source-image ↔ model-image geometry.
 
-The deployed lane engine was validated with the complete Garmin frame resized
-to 480x360.  A centre crop looks geometrically cleaner, but discards the road
-boundaries that the current model actually relies on.  Keep the full FOV by
-default and retain the exact inverse affine mapping for overlays and object
-ground-contact points.  Any crop must be enabled only after model validation.
+Horizontal crop stays disabled: it removed ~145 px from both sides of the
+960x502 Garmin input and materially reduced lane recall.
+
+Sky crop, by contrast, is now on by default.  The lane engine was trained on
+OpenLane framing, where the horizon sits near mid-frame; the Garmin clips put it
+much lower, so a full-frame resize squeezes the whole road into the bottom of
+the 480x360 input.  Trimming sky restores training-like framing.
+
+The P matrix deliberately does not change with this crop: it describes the
+model's own assumed OpenLane camera, not the source frame.  Source ↔ model
+geometry is entirely this class's job, and source_to_model/model_to_source
+already carry crop_y, so overlays and ground-contact points stay aligned.
+
+Measured over 200-frame samples (scripts/debug/crop_sweep.py), frames with a
+measured ego corridor:
+
+    clip           0%      20%
+    GRMN6694    80.5%    84.5%
+    GRMN6695    57.0%    76.5%
+    GRMN6700    31.5%    44.0%
+
+Ego lane width held at ~3.2 m across the change, so the crop did not bias the
+model's 3D regression.  Past ~25% it collapses toward 2.6-2.9 m, which is why
+this is capped well below that.  Small crops are worse than none at all -
+around 10% recall falls off a cliff on every clip tested (1.5-11.5%), so do not
+treat this value as safe to nudge downward without re-running the sweep.
 """
 
 from __future__ import annotations
@@ -13,6 +34,9 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
+
+# Fraction of source height trimmed from the top before the model resize.
+SKY_CROP_FRAC = 0.20
 
 
 @dataclass(frozen=True)
@@ -33,16 +57,20 @@ class CameraTransform:
         cls,
         frame: np.ndarray,
         model_size: tuple[int, int] = (480, 360),
-        sky_crop_px: int = 0,
+        sky_crop_px: int | None = None,
     ) -> "CameraTransform":
+        """Build the transform for a source frame.
+
+        sky_crop_px defaults to SKY_CROP_FRAC of the frame height; pass 0 to
+        disable the crop, or an explicit pixel count to override it.
+        """
         h, w = frame.shape[:2]
         model_w, model_h = model_size
         if h <= 0 or w <= 0:
             raise ValueError("Cannot build a camera transform for an empty frame")
 
-        # Do not crop left/right: it removed ~145 px from both sides of the
-        # 960x502 Garmin input and materially reduced lane recall.  Sky crop
-        # remains opt-in for a future, validated preprocessing sweep.
+        if sky_crop_px is None:
+            sky_crop_px = int(SKY_CROP_FRAC * h)
         sky_crop_px = max(0, min(int(sky_crop_px), h - 2))
         return cls(
             w, h, model_w, model_h,

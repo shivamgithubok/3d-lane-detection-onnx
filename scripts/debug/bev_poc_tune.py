@@ -31,6 +31,7 @@ from src.inference.lane_preprocess import prepare_lane_input
 from src.inference.postprocess import postprocess_onnx_output
 from src.tracking.lane_frame import LaneFrameModel
 from src.tracking.road_state import RoadStateEstimator
+from src.utils.camera_transform import CameraTransform
 from src.utils.ego_speed import EgoSpeedLog
 
 INPUT_H, INPUT_W = 360, 480
@@ -78,15 +79,16 @@ def load_backend(force_onnx=False):
     return lambda img, mask: sess.run(None, {"img": img, "mask": mask})
 
 CACHE_DIR = "output/poc_cache"
+# The GRMN clips are the deployment camera and carry the most weight; the
+# example clips are kept only to catch regressions on other cameras.
 VIDEOS = [
     "testing_new_videos/GRMN6694_540_nohud.mp4",
     "testing_new_videos/GRMN6695_540_nohud.mp4",
-    "testing_new_videos/GRMN6700_540p30_nohud.mp4",
+    "testing_new_videos/GRMN6700_540_nohud.mp4",
     "data/images/example_1.mp4",
     "data/images/example_3.mp4",
+    "data/images/example_traffic.mp4",
 ]
-# example_traffic.mp4 is excluded: the lane detector returns 0 proposals on every
-# frame even at conf 0.05, so it measures detection failure, not render quality.
 PROBE_YS = (10.0, 20.0, 40.0)
 
 
@@ -103,7 +105,10 @@ def cache_video(infer, video, max_frames):
         ok, frame = cap.read()
         if not ok:
             break
-        img, mask, meta = prepare_lane_input(cv2.resize(frame, (INPUT_W, INPUT_H)))
+        # Must match worker.py exactly, including the default sky crop, or the
+        # cache silently describes a different pipeline than production.
+        tf = CameraTransform.for_frame(frame, (INPUT_W, INPUT_H))
+        img, mask, meta = prepare_lane_input(tf.apply(frame))
         reg, _ = infer(img, mask)
         raw, _ = postprocess_onnx_output(reg, conf_threshold=meta["conf"])
         sp = speed_log.get_mps(n) if speed_log is not None else None
