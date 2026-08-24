@@ -219,8 +219,9 @@ class ADASMainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready. PySide6 Engine active.")
 
-    @Slot(np.ndarray, list, list, object, str, object, object, float, float)
-    def on_frame_processed(self, frame_rgb, proposals, processed_objs, cipo_obj, cipo_status, left_3d, right_3d, fps, latency_ms):
+    @Slot(np.ndarray, list, list, object, str, object, object, float, float, object, float)
+    def on_frame_processed(self, frame_rgb, proposals, processed_objs, cipo_obj, cipo_status,
+                           left_3d, right_3d, fps, latency_ms, speed_mps=None, source_dt=1.0 / 30.0):
         """Callback invoked when worker thread emits a newly processed frame."""
         # 1. Update Camera Video Label
         h, w, ch = frame_rgb.shape
@@ -231,7 +232,10 @@ class ADASMainWindow(QMainWindow):
 
 
         # 2. Update BEV Canvas Widget
-        self.bev_widget.update_bev_data(proposals, processed_objs, cipo_status, left_3d, right_3d)
+        self.bev_widget.update_bev_data(
+            proposals, processed_objs, cipo_status, left_3d, right_3d,
+            speed_mps=speed_mps, dt=source_dt,
+        )
 
         # 3. Update HUD Badges
         self.lbl_fps.setText(f"FPS: {fps:.1f}")

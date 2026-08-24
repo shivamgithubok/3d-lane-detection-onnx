@@ -49,6 +49,11 @@ Item {
     property real egoRotY: 180
     property real egoRotZ: 0
     property real egoY: 0.3
+    // Lane-anchored render: the lane is pinned and the ego moves within it.
+    property real egoX: 0
+    property real egoYawDeg: 0
+    property bool laneValid: false
+    property bool laneHeld: false
     property real targetCarLength: 4.6
     property bool egoFitted: false
     property string egoDebug: "bounds pending"
@@ -97,13 +102,10 @@ Item {
     }
 
     function applyEdges() {
-        // P1: dynamic outer edges from detections; hide static ±5.35 when live
-        let rows = []
-        try { rows = JSON.parse(root.edgeJson || "[]") } catch (e) { rows = [] }
-        const hasDyn = root.cinematicRoad && rows.length > 0
-        staticEdgeL.visible = root.cinematicRoad && !hasDyn
-        staticEdgeR.visible = root.cinematicRoad && !hasDyn
-        applySegPool(edgeRep, hasDyn ? root.edgeJson : "[]", 0.028)
+        // Road edges come only from stable, hysteretic lane slots. There is no
+        // static ±5.35 fallback: it used to pop in on every detection miss and
+        // cross the real edge on curves.
+        applySegPool(edgeRep, root.cinematicRoad ? root.edgeJson : "[]", 0.028)
     }
 
     function applyTraffic() {
@@ -275,29 +277,6 @@ Item {
             }
         }
 
-        Model {
-            id: staticEdgeL
-            visible: root.cinematicRoad
-            source: "#Cube"
-            position: Qt.vector3d(-5.35, 0.025, -40)
-            scale: Qt.vector3d(0.0012, 0.0002, 0.78)
-            materials: PrincipledMaterial {
-                lighting: PrincipledMaterial.NoLighting
-                baseColor: "#ebefff"
-            }
-        }
-        Model {
-            id: staticEdgeR
-            visible: root.cinematicRoad
-            source: "#Cube"
-            position: Qt.vector3d(5.35, 0.025, -40)
-            scale: Qt.vector3d(0.0012, 0.0002, 0.78)
-            materials: PrincipledMaterial {
-                lighting: PrincipledMaterial.NoLighting
-                baseColor: "#ebefff"
-            }
-        }
-
         Repeater3D {
             id: edgeRep
             model: 24
@@ -421,7 +400,8 @@ Item {
         Model {
             visible: root.egoGltf.toString() === "" || egoCar.status === RuntimeLoader.Error
             source: "#Cube"
-            position: Qt.vector3d(0, 0.65, 0)
+            position: Qt.vector3d(root.egoX, 0.65, 0)
+            eulerRotation: Qt.vector3d(0, root.egoYawDeg, 0)
             scale: Qt.vector3d(0.018, 0.013, 0.043)
             materials: PrincipledMaterial {
                 baseColor: "#00c8ff"
@@ -435,9 +415,9 @@ Item {
             id: egoCar
             source: root.egoGltf
             visible: root.egoGltf.toString() !== "" && status !== RuntimeLoader.Error
-            position: Qt.vector3d(0, root.egoY, 0)
+            position: Qt.vector3d(root.egoX, root.egoY, 0)
             scale: Qt.vector3d(root.egoScale, root.egoScale, root.egoScale)
-            eulerRotation: Qt.vector3d(root.egoRotX, root.egoRotY, root.egoRotZ)
+            eulerRotation: Qt.vector3d(root.egoRotX, root.egoRotY + root.egoYawDeg, root.egoRotZ)
         }
 
         Timer {
@@ -588,9 +568,14 @@ Item {
             text: egoCar.status === RuntimeLoader.Error
                   ? ("GLB error: " + egoCar.errorString)
                   : (egoCar.status === RuntimeLoader.Success
-                     ? ("Phase 4 — ego + " + root.trafficCount + " traffic")
+                     ? (root.laneHeld ? "lane held — dead reckoning"
+                        : (root.laneValid
+                           ? ("lane locked  " + root.egoX.toFixed(2) + " m  "
+                              + root.egoYawDeg.toFixed(1) + "°")
+                           : "no lane"))
                      : root.overlayHint)
-            color: egoCar.status === RuntimeLoader.Error ? "#f85149" : "#8b949e"
+            color: egoCar.status === RuntimeLoader.Error ? "#f85149"
+                 : (root.laneHeld ? "#d9822b" : "#8b949e")
             font.pixelSize: 9
         }
     }

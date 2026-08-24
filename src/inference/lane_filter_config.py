@@ -75,7 +75,7 @@ ENABLE_ADAPTIVE_CONF = True
 DARK_LUMA_MAX = 125.0           # mean HSV-V of lower 2/3 of the model image
 CLAHE_CLIP = 2.5
 CLAHE_TILE = 8
-DARK_CONF_THRESHOLD = 0.28      # vs CONF_THRESHOLD; geometry filters still apply
+DARK_CONF_THRESHOLD = 0.35      # vs CONF_THRESHOLD; geometry filters still apply
 
 # --- CIPO / P1 in-path hysteresis ---
 CIPO_ENTER_HITS = 2            # frames inside before marking in_path

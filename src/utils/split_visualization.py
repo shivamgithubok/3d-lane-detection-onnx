@@ -6,7 +6,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from src.utils.visualization import draw_bev
 from src.inference.postprocess import ANCHOR_Y_STEPS, decode_lane_pixels
-from src.utils.drivable_area import extract_ego_corridor_3d, get_ego_corridor_2d_pixels, get_ego_corridor_sides_2d, fill_missing_lane_gaps, find_ego_lanes
+from src.utils.drivable_area import extract_ego_corridor_3d, get_ego_corridor_2d_pixels, get_ego_corridor_sides_2d, fill_missing_lane_gaps, find_ego_lanes, parse_lane_components, parse_lane_components
 from src.utils.draw_3d_box import draw_3d_wireframe_box
 
 
@@ -129,8 +129,6 @@ def draw_futuristic_corner_bbox(img, pt1, pt2, color, thickness=1, corner_len=14
 # ─────────────────────────────────────────────────────────────────────────────
 
 ANCHOR_LEN = 20
-
-from src.utils.drivable_area import extract_ego_corridor_3d, get_ego_corridor_2d_pixels, get_ego_corridor_sides_2d, fill_missing_lane_gaps, find_ego_lanes, parse_lane_components
 
 
 def _get_lane_mean_x(lane, anchor_len=ANCHOR_LEN):
@@ -268,7 +266,7 @@ def draw_front_view_cipo(
                 (ego_l_idx is not None and idx == ego_l_idx - 1)
                 or (ego_r_idx is not None and idx == ego_r_idx + 1)
             )
-            # Hide cyan ego polylines — corridor fill already shows the ego path.
+            # Hide ego polylines — corridor fill already shows the ego path.
             # Keep adjacent lanes live so next-lane context stays dynamic.
             if not is_adj:
                 continue

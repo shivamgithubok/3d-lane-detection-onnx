@@ -37,8 +37,10 @@ def preprocess_frame(frame):
     return img, mask, resized, frame_transform, meta
 
 class InferenceWorker(QThread):
-    # Signal emitted to UI: frame_rgb, proposals, processed_objs, cipo_obj, cipo_status, left_3d, right_3d, avg_fps, latency_ms
-    frame_processed = Signal(np.ndarray, list, list, object, str, object, object, float, float)
+    # Signal emitted to UI: frame_rgb, proposals, processed_objs, cipo_obj, cipo_status,
+    # left_3d, right_3d, avg_fps, latency_ms, speed_mps, source_dt
+    # speed_mps / source_dt drive the lane-anchored BEV: the road scrolls by v*dt.
+    frame_processed = Signal(np.ndarray, list, list, object, str, object, object, float, float, object, float)
     status_message = Signal(str)
 
     def __init__(self, video_path=None, model_path="models/anchor3dlane_raw.engine", parent=None):
@@ -200,6 +202,7 @@ class InferenceWorker(QThread):
                 cipo_obj = None
                 cipo_status = "SAFE"
                 ego_left, ego_right = None, None
+                speed_mps = None
 
                 if frame is not None and use_trt:
                     # Step A: 3D Lane TensorRT Inference
@@ -318,7 +321,8 @@ class InferenceWorker(QThread):
 
                 # Emit signal to GUI
                 self.frame_processed.emit(
-                    frame_rgb, proposals, processed_objs, cipo_obj, cipo_status, left_3d, right_3d, avg_fps, latency_ms
+                    frame_rgb, proposals, processed_objs, cipo_obj, cipo_status, left_3d, right_3d,
+                    avg_fps, latency_ms, speed_mps, float(source_dt)
                 )
 
                 frame_i += 1

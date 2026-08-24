@@ -3,6 +3,11 @@ Qt Quick 3D BEV viewport.
 
 Embeds a View3D inside the existing QWidget cockpit via QQuickWidget.
 Same public API as BEVWidget so main_window can swap backends.
+
+Geometry is built in the *lane frame* (see src/tracking/lane_frame.py): the lane
+is pinned to the canvas and the ego car moves and yaws within it, which is what
+production cockpits do. Everything is sampled uniformly along Y with a constant
+point count, so the QML segment pools no longer pop as anchor visibility changes.
 """
 
 from __future__ import annotations
@@ -31,8 +36,8 @@ from src.ui.car_assets import (
     TRUCK_LABELS,
     asset_url,
 )
-from src.utils.drivable_area import find_ego_lanes, find_outer_lanes, parse_lane_components
-from src.inference import lane_filter_config as cfg
+from src.tracking.lane_frame import LaneFrameModel
+from src.utils.drivable_area import parse_lane_components
 
 # Local copies — do not import bev_widget (QPainter + sprite pipeline).
 BEV_MAX_DIST_M = 60.0
@@ -43,9 +48,54 @@ DEFAULT_ZOOM = 1.05
 DEFAULT_CALIB_PITCH = -7.0
 DEFAULT_CALIB_H = 1.0
 
+# Uniform sampling of every lane-frame polyline. Constant across frames.
+POLY_SAMPLES = 48
+CORRIDOR_SEGS = 12
+BOUNDARY_SEGS = 12
+
+# Lane-slot presence hysteresis: how a neighbouring marking fades in/out.
+SLOT_MATCH_M = 0.90
+SLOT_ENTER_HITS = 3
+SLOT_EXIT_MISS = 10
+MAX_SLOT = 3  # boundaries per side beyond the ego pair
+
 _QML_PATH = os.path.join(os.path.dirname(__file__), "qml", "BevScene.qml")
 _YAW_AWAY = 180.0  # same heading as ego (rear toward chase cam)
 _SEDAN_CYCLE = (KIND_SKODA, KIND_SHC)
+
+
+class _SlotTracker:
+    """Hysteretic presence for lane boundaries at fixed lane-width multiples.
+
+    Replaces find_outer_lanes(), which re-picked the outermost lane purely by
+    mean X every frame and so teleported the road edge by a whole lane width
+    whenever a new far marking appeared.
+    """
+
+    def __init__(self):
+        self._hits = {}
+        self._on = {}
+
+    def update(self, present_slots, all_slots):
+        for s in all_slots:
+            hit = s in present_slots
+            h = self._hits.get(s, 0)
+            if hit:
+                h = min(SLOT_ENTER_HITS, h + 1) if h >= 0 else 1
+                self._hits[s] = h
+                if h >= SLOT_ENTER_HITS:
+                    self._on[s] = SLOT_EXIT_MISS
+            else:
+                self._hits[s] = 0
+                if s in self._on:
+                    self._on[s] -= 1
+                    if self._on[s] <= 0:
+                        del self._on[s]
+        return sorted(self._on.keys())
+
+    def reset(self):
+        self._hits.clear()
+        self._on.clear()
 
 
 class BevQuick3DWidget(QQuickWidget):
@@ -63,7 +113,8 @@ class BevQuick3DWidget(QQuickWidget):
         self.right_3d = None
         self.cinematic_road = True
         self.show_lane_lines = True
-        self._motion = {}
+        self.lane_frame = LaneFrameModel()
+        self._slots = _SlotTracker()
         self._last_traffic_json = None
         self._last_corridor_json = None
         self._last_lane_json = None
@@ -159,290 +210,146 @@ class BevQuick3DWidget(QQuickWidget):
         # Highway same-direction traffic: every car faces like ego.
         return _YAW_AWAY
 
+    # ------------------------------------------------------------- geometry
     @staticmethod
-    def _interp_x_at_y(pts, y_target):
-        arr = np.asarray(pts, dtype=np.float64)
-        if arr.ndim != 2 or arr.shape[0] < 1:
-            return None
-        ys = arr[:, 1]
-        xs = arr[:, 0]
-        order = np.argsort(ys)
-        ys = ys[order]
-        xs = xs[order]
-        if y_target <= ys[0]:
-            return float(xs[0])
-        if y_target >= ys[-1]:
-            return float(xs[-1])
-        return float(np.interp(y_target, ys, xs))
+    def _poly_segments(ys, xs, width, pal=None, max_segs=BOUNDARY_SEGS):
+        """Segment rows from a uniformly sampled lane-frame polyline.
 
-    def _corridor_polylines(self, left_3d, right_3d, y_start=None):
-        if left_3d is None or right_3d is None:
-            return None, None
-        left = np.asarray(left_3d, dtype=np.float64)
-        right = np.asarray(right_3d, dtype=np.float64)
-        if left.ndim != 2 or right.ndim != 2 or len(left) < 2 or len(right) < 2:
-            return None, None
-        if y_start is None:
-            y_start = float(getattr(cfg, "CORRIDOR_Y_START_M", 4.0))
-        x_l0 = self._interp_x_at_y(left, y_start)
-        x_r0 = self._interp_x_at_y(right, y_start)
-        if x_l0 is None or x_r0 is None:
-            return None, None
-        if x_l0 > x_r0:
-            x_l0, x_r0 = x_r0, x_l0
-        left_out = [(x_l0, float(y_start))]
-        right_out = [(x_r0, float(y_start))]
-        for row in left:
-            if float(row[1]) > y_start + 0.05:
-                left_out.append((float(row[0]), float(row[1])))
-        for row in right:
-            if float(row[1]) > y_start + 0.05:
-                right_out.append((float(row[0]), float(row[1])))
-        if len(left_out) < 2 or len(right_out) < 2:
-            return None, None
-        return left_out, right_out
-
-    @staticmethod
-    def _pair_segments(left_xy, right_xy, max_segs=14):
-        n = min(len(left_xy), len(right_xy), max_segs + 1)
+        ys/xs have a fixed length, so the emitted segment count is identical
+        every frame and the QML pools never pop in or out.
+        """
+        n = min(len(ys), len(xs))
         if n < 2:
             return []
         step = max(1, (n - 1) // max_segs)
         segs = []
         i = 0
         while i + step < n:
-            (xl0, yl0), (xl1, yl1) = left_xy[i], left_xy[i + step]
-            (xr0, yr0), (xr1, yr1) = right_xy[i], right_xy[i + step]
-            x0 = 0.5 * (xl0 + xr0)
-            x1 = 0.5 * (xl1 + xr1)
-            y0 = 0.5 * (yl0 + yr0)
-            y1 = 0.5 * (yl1 + yr1)
-            dx = x1 - x0
-            dy = y1 - y0
+            x0, y0 = float(xs[i]), float(ys[i])
+            x1, y1 = float(xs[i + step]), float(ys[i + step])
+            dx, dy = x1 - x0, y1 - y0
             length = math.hypot(dx, dy)
-            if length < 0.4:
-                i += step
-                continue
-            w0 = abs(xr0 - xl0)
-            w1 = abs(xr1 - xl1)
-            w = max(0.8, 0.5 * (w0 + w1))
-            # Qt yaw: +Y up, length along local Z after yaw. World Δx, Δz=-Δy.
-            yaw = math.degrees(math.atan2(dx, -dy))
-            segs.append({
-                "x": round(0.5 * (x0 + x1), 2),
-                "z": round(-0.5 * (y0 + y1), 2),
-                "yaw": round(yaw, 1),
-                "len": round(length, 2),
-                "w": round(w, 2),
-            })
+            if length >= 0.35:
+                # Qt yaw: +Y up, length along local Z after yaw. World Δx, Δz=-Δy.
+                row = {
+                    "x": round(0.5 * (x0 + x1), 2),
+                    "z": round(-0.5 * (y0 + y1), 2),
+                    "yaw": round(math.degrees(math.atan2(dx, -dy)), 1),
+                    "len": round(length, 2),
+                    "w": round(float(width), 2),
+                }
+                if pal is not None:
+                    row["c"] = int(pal)
+                segs.append(row)
             i += step
         return segs
 
-    @staticmethod
-    def _visible_xy(xs, ys, vis):
-        xy = []
-        for i in range(len(xs)):
-            if not vis[i]:
-                continue
-            y = float(ys[i])
-            if y <= 1.0 or y > BEV_MAX_DIST_M:
-                continue
-            xy.append((float(xs[i]), y))
-        return xy
-
-    @staticmethod
-    def _point_at_s(pts, cum, s):
-        if s <= 0:
-            return pts[0]
-        if s >= cum[-1]:
-            return pts[-1]
-        i = int(np.searchsorted(cum, s, side="right") - 1)
-        i = max(0, min(i, len(pts) - 2))
-        span = cum[i + 1] - cum[i]
-        t = 0.0 if span < 1e-6 else (s - cum[i]) / span
-        return (1.0 - t) * pts[i] + t * pts[i + 1]
-
-    def _dashes_along(self, xy, dash=3.2, gap=4.0, max_segs=12):
-        if len(xy) < 2:
-            return []
-        pts = np.asarray(xy, dtype=np.float64)
-        dxy = np.diff(pts, axis=0)
-        seglen = np.hypot(dxy[:, 0], dxy[:, 1])
-        total = float(seglen.sum())
-        if total < 1.0:
-            return []
-        cum = np.concatenate(([0.0], np.cumsum(seglen)))
-        period = dash + gap
-        segs = []
-        s0 = 0.0
-        while s0 < total - 0.35 and len(segs) < max_segs:
-            s1 = min(s0 + dash, total)
-            if s1 - s0 >= 0.45:
-                p0 = self._point_at_s(pts, cum, s0)
-                p1 = self._point_at_s(pts, cum, s1)
-                dx = float(p1[0] - p0[0])
-                dy = float(p1[1] - p0[1])
-                length = math.hypot(dx, dy)
-                if length >= 0.45:
-                    yaw = math.degrees(math.atan2(dx, -dy))
-                    segs.append({
-                        "x": round(0.5 * (float(p0[0]) + float(p1[0])), 2),
-                        "z": round(-0.5 * (float(p0[1]) + float(p1[1])), 2),
-                        "yaw": round(yaw, 1),
-                        "len": round(length, 2),
-                        "w": 0.18,
-                    })
-            s0 += period
-        return segs
-
-    def _dash_payload(self, proposals):
-        """White Film dashes along detected ego-left / ego-right polylines (not inset)."""
-        rows = []
+    def _lane_frame_mean_xs(self, proposals):
+        """Mean lateral X of every detected lane, expressed in the lane frame."""
+        out = []
         if not proposals:
-            return rows
-        try:
-            ego_left, ego_right = find_ego_lanes(proposals)
-        except Exception:
-            ego_left, ego_right = None, None
-        for lane in (ego_left, ego_right):
-            if lane is None:
-                continue
+            return out
+        for lane in proposals:
             try:
-                xs, ys, zs, vis = parse_lane_components(lane)
+                xs, ys, _zs, vis = parse_lane_components(lane)
             except Exception:
                 continue
-            xy = self._visible_xy(xs, ys, vis)
-            rows.extend(self._dashes_along(xy))
+            m = vis & (ys > 1.0) & (ys <= BEV_MAX_DIST_M)
+            if int(np.sum(m)) < 2:
+                continue
+            lx = self.lane_frame.to_lane_frame(xs[m], ys[m])
+            out.append(float(np.mean(lx)))
+        return out
+
+    def _active_slots(self, proposals):
+        """Which lane boundaries exist, as signed lane-width multiples.
+
+        Slot k>0 is the k-th boundary right of ego centre, k<0 to the left;
+        |k|=1 is the ego lane's own marking.
+        """
+        half_w = self.lane_frame.half_width
+        width = self.lane_frame.lane_width
+        candidates = {}
+        for k in range(1, MAX_SLOT + 2):
+            off = half_w + (k - 1) * width
+            candidates[k] = off
+            candidates[-k] = -off
+
+        means = self._lane_frame_mean_xs(proposals)
+        present = set()
+        for mx in means:
+            best, best_d = None, SLOT_MATCH_M
+            for k, off in candidates.items():
+                d = abs(mx - off)
+                if d < best_d:
+                    best, best_d = k, d
+            if best is not None:
+                present.add(best)
+        # Ego pair is implied by a valid corridor even if the paint is faint.
+        if self.lane_frame.valid:
+            present.update({-1, 1})
+        return self._slots.update(present, list(candidates.keys())), candidates
+
+    # -------------------------------------------------------------- payloads
+    def _corridor_payload(self):
+        if not self.lane_frame.valid:
+            return []
+        ys, cx = self.lane_frame.centerline(BEV_MAX_DIST_M, POLY_SAMPLES)
+        w = max(0.8, self.lane_frame.lane_width)
+        rows = self._poly_segments(ys, cx, w, max_segs=CORRIDOR_SEGS)
+        return rows[:14]
+
+    def _dash_payload(self):
+        """White ego-lane dashes that scroll backwards with integrated odometry."""
+        if not self.lane_frame.valid:
+            return []
+        half_w = self.lane_frame.half_width
+        rows = []
+        for span_y0, span_y1 in self.lane_frame.dash_spans(BEV_MAX_DIST_M):
+            if span_y1 - span_y0 < 0.45:
+                continue
+            ys = np.linspace(span_y0, span_y1, 3)
+            cx = self.lane_frame.lane_x(ys)
+            for sign in (-1.0, 1.0):
+                rows.extend(self._poly_segments(ys, cx + sign * half_w, 0.18, max_segs=1))
             if len(rows) >= 28:
                 break
         return rows[:28]
 
-    def _edge_payload(self, proposals):
-        """
-        P1: dynamic outer road-edge ribbons from outermost detected lanes.
-        Falls back to empty → QML keeps static ±5.35 only when no detections.
-        """
+    def _edge_payload(self, slots, offsets):
+        """Outer road edges from the outermost *stable* boundary on each side."""
+        if not self.lane_frame.valid or not slots:
+            return []
+        left = [k for k in slots if k < 0]
+        right = [k for k in slots if k > 0]
         rows = []
-        if not proposals:
-            return rows
-        outer_l, outer_r = find_outer_lanes(proposals)
-        for lane in (outer_l, outer_r):
-            if lane is None:
+        for group, pick in ((left, min), (right, max)):
+            if not group:
                 continue
-            try:
-                xs, ys, zs, vis = parse_lane_components(lane)
-            except Exception:
+            k = pick(group)
+            if abs(k) < 2:  # the ego pair is drawn as dashes, not a road edge
                 continue
-            xy = self._visible_xy(xs, ys, vis)
-            if len(xy) < 2:
-                continue
-            # Thicker white edge (w~0.22) along detected outer polyline
-            n = len(xy)
-            step = max(1, (n - 1) // 10)
-            i = 0
-            while i + step < n and len(rows) < 24:
-                x0, y0 = xy[i]
-                x1, y1 = xy[i + step]
-                dx = x1 - x0
-                dy = y1 - y0
-                length = math.hypot(dx, dy)
-                if length >= 0.6:
-                    yaw = math.degrees(math.atan2(dx, -dy))
-                    rows.append({
-                        "x": round(0.5 * (x0 + x1), 2),
-                        "z": round(-0.5 * (y0 + y1), 2),
-                        "yaw": round(yaw, 1),
-                        "len": round(length, 2),
-                        "w": 0.22,
-                    })
-                i += step
+            ys, xs = self.lane_frame.boundary(offsets[k], BEV_MAX_DIST_M, POLY_SAMPLES)
+            rows.extend(self._poly_segments(ys, xs, 0.22, max_segs=BOUNDARY_SEGS))
         return rows[:24]
 
-    @staticmethod
-    def _ribbon_segments(xy, pal, max_segs=12, width=0.16):
-        if len(xy) < 2:
+    def _lane_payload(self, slots, offsets):
+        """Adjacent lane markings between the ego pair and the road edge."""
+        if not self.lane_frame.valid or not slots:
             return []
-        n = len(xy)
-        step = max(1, (n - 1) // max_segs)
-        segs = []
-        i = 0
-        while i + step < n:
-            x0, y0 = xy[i]
-            x1, y1 = xy[i + step]
-            dx = x1 - x0
-            dy = y1 - y0
-            length = math.hypot(dx, dy)
-            if length < 0.5:
-                i += step
-                continue
-            yaw = math.degrees(math.atan2(dx, -dy))
-            segs.append({
-                "x": round(0.5 * (x0 + x1), 2),
-                "z": round(-0.5 * (y0 + y1), 2),
-                "yaw": round(yaw, 1),
-                "len": round(length, 2),
-                "w": round(float(width), 2),
-                "c": pal,
-            })
-            i += step
-        return segs
-
-    def _corridor_payload(self, left_3d, right_3d):
-        left_xy, right_xy = self._corridor_polylines(left_3d, right_3d)
-        if not left_xy:
-            return []
-        return self._pair_segments(left_xy, right_xy)
-
-    def _lane_payload(self, proposals):
+        left = [k for k in slots if k < 0]
+        right = [k for k in slots if k > 0]
         rows = []
-        if not proposals:
-            return rows
-        try:
-            ego_left, ego_right = find_ego_lanes(proposals)
-        except Exception:
-            ego_left, ego_right = None, None
-        ranked = []
-        for lane in proposals:
-            try:
-                xs, ys, zs, vis = parse_lane_components(lane)
-            except Exception:
-                continue
-            if int(np.sum(vis)) < 2:
-                continue
-            xy = self._visible_xy(xs, ys, vis)
-            if len(xy) < 2:
-                continue
-            mx = float(np.mean([p[0] for p in xy]))
-            ranked.append((mx, lane, xy))
-        ranked.sort(key=lambda t: t[0])
-
-        ego_l_idx = ego_r_idx = None
-        for idx, (mx, lane, xy) in enumerate(ranked):
-            if ego_left is not None and np.array_equal(lane, ego_left):
-                ego_l_idx = idx
-            if ego_right is not None and np.array_equal(lane, ego_right):
-                ego_r_idx = idx
-
-        for idx, (mx, lane, xy) in enumerate(ranked):
-            is_ego = (idx == ego_l_idx) or (idx == ego_r_idx)
-            is_adj = (
-                (ego_l_idx is not None and idx == ego_l_idx - 1)
-                or (ego_r_idx is not None and idx == ego_r_idx + 1)
-            )
-            if not is_ego and not is_adj:
-                continue
-            if is_ego:
-                pal, width = 0, 0.20
-            elif mx < 0:
-                pal, width = 1, 0.07
-            else:
-                pal, width = 2, 0.07
-            segs = self._ribbon_segments(xy, pal, width=width)
-            if not segs:
-                continue
-            rows.extend(segs)
-            if len(rows) >= 36:
-                break
+        for group, outer in ((left, min(left) if left else None),
+                             (right, max(right) if right else None)):
+            for k in group:
+                if abs(k) < 2 or k == outer:
+                    continue  # ego pair -> dashes, outermost -> road edge
+                pal = 1 if k < 0 else 2
+                ys, xs = self.lane_frame.boundary(offsets[k], BEV_MAX_DIST_M, POLY_SAMPLES)
+                rows.extend(self._poly_segments(ys, xs, 0.07, pal=pal, max_segs=BOUNDARY_SEGS))
+                if len(rows) >= 36:
+                    break
         return rows[:36]
 
     def _traffic_payload(self, objs):
@@ -474,8 +381,10 @@ class BevQuick3DWidget(QQuickWidget):
             asset = KIND_ASSETS[kind]
             if not asset.exists():
                 continue
-            x = float(obj["X_3d"])
             z = float(obj["Z_3d"])
+            # Traffic lives in the same lane frame as the road, otherwise cars
+            # would slide sideways whenever the ego drifted in its lane.
+            x = self._traffic_x(float(obj["X_3d"]), z)
             too_close = False
             for prev in rows:
                 dx = x - float(prev["posX"])
@@ -493,9 +402,12 @@ class BevQuick3DWidget(QQuickWidget):
                 "yawDeg": 180.0,
                 "kind": kind,
             })
-        live = {int(o.get("track_id", -1)) for o in visible}
-        self._motion = {k: v for k, v in self._motion.items() if k in live}
         return rows
+
+    def _traffic_x(self, x, z):
+        if not self.lane_frame.valid:
+            return x
+        return self.lane_frame.point_to_lane_frame(x, z)
 
     def _pick_cipo(self, objs):
         vis = [o for o in objs if self._bev_visible(o)]
@@ -518,35 +430,60 @@ class BevQuick3DWidget(QQuickWidget):
             return
         z = float(cipo.get("Z_3d", 0.0))
         self._set("cipoVisible", True)
-        self._set("cipoX", round(float(cipo.get("X_3d", 0.0)), 2))
+        self._set("cipoX", round(self._traffic_x(float(cipo.get("X_3d", 0.0)), z), 2))
         self._set("cipoZ", round(-z, 2))
         self._set("cipoDist", round(z, 1))
 
-    def update_bev_data(self, proposals, processed_objs=None, cipo_status="SAFE", left_3d=None, right_3d=None):
+    def _push_ego_pose(self):
+        offset, yaw = self.lane_frame.ego_pose()
+        # Qt yaw matches the segment convention atan2(dx, -dy): heading right
+        # decreases the angle from the 180° "facing away" base, so negate.
+        self._set("egoX", round(float(offset), 3))
+        self._set("egoYawDeg", round(-math.degrees(yaw), 2))
+        self._set("laneValid", bool(self.lane_frame.valid))
+        self._set("laneHeld", bool(self.lane_frame.held))
+
+    def update_bev_data(
+        self,
+        proposals,
+        processed_objs=None,
+        cipo_status="SAFE",
+        left_3d=None,
+        right_3d=None,
+        speed_mps=None,
+        dt=1.0 / 30.0,
+    ):
         self.proposals = proposals if proposals is not None else []
         self.processed_objs = processed_objs if processed_objs is not None else []
         self.cipo_status = cipo_status
         self.left_3d = left_3d
         self.right_3d = right_3d
-        rows = self._traffic_payload(self.processed_objs)
+
+        self.lane_frame.update(left_3d, right_3d, speed_mps=speed_mps, dt=dt)
+        if not self.lane_frame.valid:
+            self._slots.reset()
+        slots, offsets = self._active_slots(self.proposals)
+
+        self._push_ego_pose()
         self._push_cipo(self.processed_objs, cipo_status)
-        payload = json.dumps(rows, separators=(",", ":"))
+
+        payload = json.dumps(self._traffic_payload(self.processed_objs), separators=(",", ":"))
         if payload != self._last_traffic_json:
             self._last_traffic_json = payload
             self._set("trafficJson", payload)
-        corr = json.dumps(self._corridor_payload(left_3d, right_3d), separators=(",", ":"))
+        corr = json.dumps(self._corridor_payload(), separators=(",", ":"))
         if corr != self._last_corridor_json:
             self._last_corridor_json = corr
             self._set("corridorJson", corr)
-        lanes = json.dumps(self._lane_payload(self.proposals), separators=(",", ":"))
+        lanes = json.dumps(self._lane_payload(slots, offsets), separators=(",", ":"))
         if lanes != self._last_lane_json:
             self._last_lane_json = lanes
             self._set("laneJson", lanes)
-        dashes = json.dumps(self._dash_payload(self.proposals), separators=(",", ":"))
+        dashes = json.dumps(self._dash_payload(), separators=(",", ":"))
         if dashes != self._last_dash_json:
             self._last_dash_json = dashes
             self._set("dashJson", dashes)
-        edges = json.dumps(self._edge_payload(self.proposals), separators=(",", ":"))
+        edges = json.dumps(self._edge_payload(slots, offsets), separators=(",", ":"))
         if edges != self._last_edge_json:
             self._last_edge_json = edges
             self._set("edgeJson", edges)
