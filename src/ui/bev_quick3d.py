@@ -62,6 +62,7 @@ MAX_SLOT = 3  # boundaries per side beyond the ego pair
 _QML_PATH = os.path.join(os.path.dirname(__file__), "qml", "BevScene.qml")
 _YAW_AWAY = 180.0  # same heading as ego (rear toward chase cam)
 _SEDAN_CYCLE = (KIND_SKODA, KIND_SHC)
+_ENV_MODES = ("auto", "day", "dusk", "night", "demo")
 
 
 class _SlotTracker:
@@ -103,8 +104,10 @@ class BevQuick3DWidget(QQuickWidget):
         super().__init__(parent)
         self.setMinimumSize(320, 240)
         self.setResizeMode(QQuickWidget.SizeRootObjectToView)
-        self.setClearColor(Qt.black)
+        # Transparent so the QML 2D sky gradient behind View3D is visible.
+        self.setClearColor(Qt.transparent)
         self.setAttribute(Qt.WA_AlwaysStackOnTop, False)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
 
         self.proposals = []
         self.processed_objs = []
@@ -113,6 +116,7 @@ class BevQuick3DWidget(QQuickWidget):
         self.right_3d = None
         self.cinematic_road = True
         self.show_lane_lines = True
+        self.env_mode = "auto"
         self.lane_frame = LaneFrameModel()
         self._slots = _SlotTracker()
         self._last_traffic_json = None
@@ -135,6 +139,7 @@ class BevQuick3DWidget(QQuickWidget):
             pan_x=0.0,
             pan_y=0.0,
         )
+        self._set("envMode", self.env_mode)
         self._bind_ego_asset()
 
     def _root(self):
@@ -192,6 +197,29 @@ class BevQuick3DWidget(QQuickWidget):
         self.show_lane_lines = not self.show_lane_lines
         self._set("showLaneLines", self.show_lane_lines)
         return self.show_lane_lines
+
+    def cycle_env_mode(self):
+        """Cycle BEV background: Auto → Day → Dusk → Night → Demo."""
+        root = self._root()
+        if root is not None:
+            cur = root.property("envMode")
+            if cur:
+                self.env_mode = str(cur)
+        try:
+            i = _ENV_MODES.index(self.env_mode)
+        except ValueError:
+            i = -1
+        self.env_mode = _ENV_MODES[(i + 1) % len(_ENV_MODES)]
+        self._set("envMode", self.env_mode)
+        return self.env_mode
+
+    def set_env_mode(self, mode: str):
+        mode = str(mode).lower().strip()
+        if mode not in _ENV_MODES:
+            raise ValueError(f"env mode must be one of {_ENV_MODES}")
+        self.env_mode = mode
+        self._set("envMode", self.env_mode)
+        return self.env_mode
 
     def set_calibration(self, pitch_deg, height_m):
         self._set("calibPitch", float(pitch_deg))

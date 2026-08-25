@@ -80,14 +80,15 @@ def load_backend(force_onnx=False):
 
 CACHE_DIR = "output/poc_cache"
 # The GRMN clips are the deployment camera and carry the most weight; the
-# example clips are kept only to catch regressions on other cameras.
+# example clips are kept only to catch regressions on other dashcams.
+# example_traffic.mp4 is deliberately absent: it is not dashcam footage, so its
+# mounting geometry is not representative of anything this system ships against.
 VIDEOS = [
     "testing_new_videos/GRMN6694_540_nohud.mp4",
     "testing_new_videos/GRMN6695_540_nohud.mp4",
     "testing_new_videos/GRMN6700_540_nohud.mp4",
     "data/images/example_1.mp4",
     "data/images/example_3.mp4",
-    "data/images/example_traffic.mp4",
 ]
 PROBE_YS = (10.0, 20.0, 40.0)
 

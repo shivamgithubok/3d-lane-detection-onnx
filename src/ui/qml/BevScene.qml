@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Shapes
 import QtQuick3D
 import QtQuick3D.AssetUtils
 
@@ -18,6 +19,32 @@ Item {
     property bool cinematicRoad: true
     property bool showLaneLines: true
     property bool showCalib: false
+    // Background: Auto (clock) | Day | Dusk | Night | Demo
+    property string envMode: "auto"
+    property real clockHour: 12.0
+    property string envPhase: "day"
+    property string envLabel: "Env Auto"
+    property color skyTopColor: "#1a2740"
+    property color skyMidColor: "#3a4a62"
+    property color skyBotColor: "#6b7a90"
+    property color clearCol: "#0e1218"
+    property color lightCol: "#fff4e8"
+    property color ambientCol: "#4a5564"
+    property real lightBright: 1.35
+    property real sunElev: 0.65
+    property real sunAzim: 18.0
+    property color sunColor: "#ffe2a8"
+    property real sunGlowScale: 1.0
+    property bool sunIsMoon: false
+    property color asphaltCol: "#101216"
+    property color shoulderCol: "#0a0c10"
+    property color mistCol: "#6b7a90"
+    property real mistOpacity: 0.55
+    property color mountainFarCol: "#3a4a5c"
+    property color mountainNearCol: "#1e2834"
+    property real sunPosX: 20
+    property real sunPosY: 40
+    property real sunPosZ: -90
     property string cipoStatus: "SAFE"
     property bool cipoVisible: false
     property real cipoX: 0
@@ -72,12 +99,352 @@ Item {
     onEdgeJsonChanged: applyEdges()
     onShowLaneLinesChanged: { applyLanes(); applyDashes(); applyEdges() }
     onCinematicRoadChanged: { applyLanes(); applyDashes(); applyEdges() }
+    onEnvModeChanged: refreshEnv()
+    onClockHourChanged: refreshEnv()
 
     Component.onCompleted: {
+        syncClockHour()
+        refreshEnv()
         applySegPool(corrRep, root.corridorJson, 0.035)
         applyLanes()
         applyDashes()
         applyEdges()
+    }
+
+    function syncClockHour() {
+        const d = new Date()
+        root.clockHour = d.getHours() + d.getMinutes() / 60.0 + d.getSeconds() / 3600.0
+    }
+
+    function cycleEnvMode() {
+        const modes = ["auto", "day", "dusk", "night", "demo"]
+        const i = modes.indexOf(root.envMode)
+        root.envMode = modes[(i < 0 ? 0 : i + 1) % modes.length]
+    }
+
+    function _lerp(a, b, t) { return a + (b - a) * t }
+
+    function _lerpColor(a, b, t) {
+        return Qt.rgba(
+            a.r + (b.r - a.r) * t,
+            a.g + (b.g - a.g) * t,
+            a.b + (b.b - a.b) * t,
+            1.0
+        )
+    }
+
+    function _palette(phase, demoBoost) {
+        // Soft sky + mist + sun look; demoBoost amplifies saturation/brightness.
+        if (phase === "night") {
+            return {
+                top: "#050810", mid: "#0b1220", bot: "#1a2740",
+                clear: "#050810",
+                light: "#c8d6e8", ambient: "#1c2430",
+                bright: demoBoost ? 0.55 : 0.42,
+                sun: "#d8e6ff", asphalt: "#0a0c10", shoulder: "#07090c",
+                mist: "#1a2740", mistOp: 0.42, moon: true, glow: demoBoost ? 1.35 : 1.0,
+                mtnFar: "#121820", mtnNear: "#080c10"
+            }
+        }
+        if (phase === "dusk") {
+            return {
+                top: "#1a1038", mid: "#b04838", bot: "#f0a060",
+                clear: "#1a1028",
+                light: "#ffd0a8", ambient: "#5a4050",
+                bright: demoBoost ? 1.55 : 1.15,
+                sun: "#ffb060", asphalt: "#121018", shoulder: "#0e0c12",
+                mist: "#e09060", mistOp: demoBoost ? 0.55 : 0.40, moon: false,
+                glow: demoBoost ? 1.8 : 1.25,
+                mtnFar: "#2a1830", mtnNear: "#120c18"
+            }
+        }
+        // day — stronger top→horizon contrast so the sky does not read as flat fill
+        return {
+            top: "#1e5aaa", mid: "#5a9ed8", bot: "#c5e2f8",
+            clear: "#5a90c0",
+            light: "#fff8ee", ambient: "#6a7a88",
+            bright: demoBoost ? 1.75 : 1.40,
+            sun: "#ffe8a0", asphalt: "#12161c", shoulder: "#101812",
+            mist: "#b8d4ea", mistOp: demoBoost ? 0.45 : 0.32, moon: false,
+            glow: demoBoost ? 1.55 : 1.1,
+            mtnFar: "#3d5568", mtnNear: "#1c2832"
+        }
+    }
+
+    function _phaseFromHour(h) {
+        // Night 19–6, dusk 15–19, day otherwise (morning shares day palette).
+        if (h >= 19.0 || h < 6.0)
+            return "night"
+        if (h >= 15.0)
+            return "dusk"
+        return "day"
+    }
+
+    function _asCol(c) {
+        return (typeof c === "object") ? c : Qt.color(c)
+    }
+
+    function _blendPalettes(a, b, t) {
+        return {
+            top: _lerpColor(_asCol(a.top), _asCol(b.top), t),
+            mid: _lerpColor(_asCol(a.mid), _asCol(b.mid), t),
+            bot: _lerpColor(_asCol(a.bot), _asCol(b.bot), t),
+            clear: _lerpColor(_asCol(a.clear), _asCol(b.clear), t),
+            light: _lerpColor(_asCol(a.light), _asCol(b.light), t),
+            ambient: _lerpColor(_asCol(a.ambient), _asCol(b.ambient), t),
+            bright: _lerp(a.bright, b.bright, t),
+            sun: _lerpColor(_asCol(a.sun), _asCol(b.sun), t),
+            asphalt: _lerpColor(_asCol(a.asphalt), _asCol(b.asphalt), t),
+            shoulder: _lerpColor(_asCol(a.shoulder), _asCol(b.shoulder), t),
+            mist: _lerpColor(_asCol(a.mist), _asCol(b.mist), t),
+            mistOp: _lerp(a.mistOp, b.mistOp, t),
+            moon: t > 0.5 ? b.moon : a.moon,
+            glow: _lerp(a.glow, b.glow, t),
+            mtnFar: _lerpColor(_asCol(a.mtnFar), _asCol(b.mtnFar), t),
+            mtnNear: _lerpColor(_asCol(a.mtnNear), _asCol(b.mtnNear), t)
+        }
+    }
+
+    function _autoPalette(h) {
+        // Smooth crossfades near phase boundaries so Auto does not hard-cut.
+        if (h >= 5.0 && h < 7.0)
+            return _blendPalettes(_palette("night", false), _palette("day", false), (h - 5.0) / 2.0)
+        if (h >= 14.5 && h < 16.5)
+            return _blendPalettes(_palette("day", false), _palette("dusk", false), (h - 14.5) / 2.0)
+        if (h >= 18.0 && h < 20.0)
+            return _blendPalettes(_palette("dusk", false), _palette("night", false), (h - 18.0) / 2.0)
+        return _palette(_phaseFromHour(h), false)
+    }
+
+    function _applySunOrbit(h, pal) {
+        // Day arc 06–18; night moon arc 18–06 (wrapped).
+        let elev = 0.35
+        let azim = 0.0
+        if (!pal.moon) {
+            const p = Math.max(0.0, Math.min(1.0, (h - 6.0) / 12.0))
+            elev = Math.sin(Math.PI * p)
+            azim = _lerp(-58.0, 58.0, p)
+        } else {
+            let hn = h
+            if (hn < 6.0)
+                hn += 24.0
+            const p = Math.max(0.0, Math.min(1.0, (hn - 18.0) / 12.0))
+            elev = 0.28 + 0.35 * Math.sin(Math.PI * p)
+            azim = _lerp(50.0, -50.0, p)
+        }
+        root.sunElev = elev
+        root.sunAzim = azim
+        root.sunIsMoon = !!pal.moon
+        root.sunGlowScale = pal.glow
+        root.sunColor = (typeof pal.sun === "object") ? pal.sun : Qt.color(pal.sun)
+
+        const dist = 98.0
+        const elevDeg = 6.0 + elev * (pal.moon ? 32.0 : 48.0)
+        const az = azim * Math.PI / 180.0
+        const el = elevDeg * Math.PI / 180.0
+        root.sunPosX = Math.sin(az) * dist * Math.cos(el)
+        root.sunPosY = Math.sin(el) * dist
+        root.sunPosZ = -Math.cos(az) * dist * Math.cos(el)
+    }
+
+    function refreshEnv() {
+        const mode = root.envMode
+        const demo = (mode === "demo")
+        let phase = "day"
+        let pal
+        if (mode === "auto") {
+            phase = _phaseFromHour(root.clockHour)
+            pal = _autoPalette(root.clockHour)
+            root.envLabel = "Env Auto"
+        } else if (mode === "demo") {
+            // Demo locks a rich golden-hour look for recordings.
+            phase = "dusk"
+            pal = _palette("dusk", true)
+            root.envLabel = "Env Demo"
+        } else {
+            phase = mode
+            pal = _palette(mode, false)
+            root.envLabel = "Env " + mode.charAt(0).toUpperCase() + mode.slice(1)
+        }
+        root.envPhase = phase
+
+        const asColor = _asCol
+        root.skyTopColor = asColor(pal.top)
+        root.skyMidColor = asColor(pal.mid)
+        root.skyBotColor = asColor(pal.bot)
+        root.clearCol = asColor(pal.clear)
+        root.lightCol = asColor(pal.light)
+        root.ambientCol = asColor(pal.ambient)
+        root.lightBright = pal.bright
+        root.asphaltCol = asColor(pal.asphalt)
+        root.shoulderCol = asColor(pal.shoulder)
+        root.mistCol = asColor(pal.mist)
+        root.mistOpacity = pal.mistOp
+        root.mountainFarCol = asColor(pal.mtnFar)
+        root.mountainNearCol = asColor(pal.mtnNear)
+
+        // Sun hour: Auto uses clock; fixed presets use a canonical hour.
+        let h = root.clockHour
+        if (mode === "day")
+            h = 12.0
+        else if (mode === "dusk" || mode === "demo")
+            h = 17.2
+        else if (mode === "night")
+            h = 22.0
+        _applySunOrbit(h, {
+            moon: pal.moon,
+            glow: pal.glow,
+            sun: pal.sun
+        })
+    }
+
+    Timer {
+        interval: 30000
+        running: true
+        repeat: true
+        onTriggered: {
+            if (root.envMode === "auto")
+                root.syncClockHour()
+        }
+    }
+
+    // Screen-space sun/moon (azimuth → X, elevation → height above horizon band).
+    readonly property real sunDiscSize: (root.sunIsMoon ? 22 : 28) * root.sunGlowScale
+    readonly property real sunScreenX: width * (0.5 + root.sunAzim / 145.0) - sunDiscSize * 1.3
+    // Keep the disc in the visible sky band (above the road horizon ~40% down).
+    readonly property real sunScreenY: {
+        const y = height * (0.33 - root.sunElev * 0.20) - sunDiscSize * 1.3
+        return Math.max(6, Math.min(height * 0.36, y))
+    }
+
+    // 2D sky + sun + mountain silhouettes sit behind the transparent View3D.
+    Rectangle {
+        id: skyBackdrop
+        anchors.fill: parent
+        z: 0
+        gradient: Gradient {
+            GradientStop { position: 0.0; color: root.skyTopColor }
+            GradientStop { position: 0.38; color: root.skyMidColor }
+            GradientStop { position: 0.72; color: root.skyBotColor }
+            GradientStop { position: 1.0; color: root.mistCol }
+        }
+    }
+
+    Item {
+        id: sunGlow
+        z: 1
+        x: root.sunScreenX
+        y: root.sunScreenY
+        width: root.sunDiscSize * 2.6
+        height: width
+        visible: true
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: parent.width
+            height: parent.height
+            radius: width / 2
+            color: Qt.rgba(root.sunColor.r, root.sunColor.g, root.sunColor.b, 0.18)
+        }
+        Rectangle {
+            anchors.centerIn: parent
+            width: root.sunDiscSize * 1.55
+            height: width
+            radius: width / 2
+            color: Qt.rgba(root.sunColor.r, root.sunColor.g, root.sunColor.b, 0.40)
+        }
+        Rectangle {
+            anchors.centerIn: parent
+            width: root.sunDiscSize
+            height: width
+            radius: width / 2
+            color: root.sunIsMoon ? "#e8eef8" : root.sunColor
+            border.width: root.sunIsMoon ? 1 : 0
+            border.color: "#a0b4d0"
+        }
+    }
+
+    // Distant mountain ranges along the horizon (replaces the fake mist slab).
+    Item {
+        id: mountainLayer
+        anchors.left: parent.left
+        anchors.right: parent.right
+        z: 1
+        y: parent.height * 0.26
+        height: parent.height * 0.22
+        opacity: root.cinematicRoad ? 1.0 : 0.0
+
+        // Far range — lighter, softer, sits behind near peaks
+        Shape {
+            anchors.fill: parent
+            ShapePath {
+                fillColor: root.mountainFarCol
+                strokeWidth: 0
+                startX: 0
+                startY: mountainLayer.height
+                PathLine { x: mountainLayer.width * 0.00; y: mountainLayer.height * 0.72 }
+                PathLine { x: mountainLayer.width * 0.10; y: mountainLayer.height * 0.38 }
+                PathLine { x: mountainLayer.width * 0.18; y: mountainLayer.height * 0.55 }
+                PathLine { x: mountainLayer.width * 0.28; y: mountainLayer.height * 0.22 }
+                PathLine { x: mountainLayer.width * 0.38; y: mountainLayer.height * 0.48 }
+                PathLine { x: mountainLayer.width * 0.50; y: mountainLayer.height * 0.18 }
+                PathLine { x: mountainLayer.width * 0.62; y: mountainLayer.height * 0.42 }
+                PathLine { x: mountainLayer.width * 0.74; y: mountainLayer.height * 0.12 }
+                PathLine { x: mountainLayer.width * 0.86; y: mountainLayer.height * 0.40 }
+                PathLine { x: mountainLayer.width * 0.96; y: mountainLayer.height * 0.28 }
+                PathLine { x: mountainLayer.width * 1.00; y: mountainLayer.height * 0.58 }
+                PathLine { x: mountainLayer.width; y: mountainLayer.height }
+                PathLine { x: 0; y: mountainLayer.height }
+            }
+        }
+
+        // Near range — darker silhouette in front
+        Shape {
+            anchors.fill: parent
+            ShapePath {
+                fillColor: root.mountainNearCol
+                strokeWidth: 0
+                startX: 0
+                startY: mountainLayer.height
+                PathLine { x: mountainLayer.width * 0.00; y: mountainLayer.height * 0.88 }
+                PathLine { x: mountainLayer.width * 0.08; y: mountainLayer.height * 0.58 }
+                PathLine { x: mountainLayer.width * 0.16; y: mountainLayer.height * 0.70 }
+                PathLine { x: mountainLayer.width * 0.26; y: mountainLayer.height * 0.45 }
+                PathLine { x: mountainLayer.width * 0.36; y: mountainLayer.height * 0.68 }
+                PathLine { x: mountainLayer.width * 0.48; y: mountainLayer.height * 0.52 }
+                PathLine { x: mountainLayer.width * 0.58; y: mountainLayer.height * 0.72 }
+                PathLine { x: mountainLayer.width * 0.70; y: mountainLayer.height * 0.40 }
+                PathLine { x: mountainLayer.width * 0.82; y: mountainLayer.height * 0.62 }
+                PathLine { x: mountainLayer.width * 0.92; y: mountainLayer.height * 0.50 }
+                PathLine { x: mountainLayer.width * 1.00; y: mountainLayer.height * 0.78 }
+                PathLine { x: mountainLayer.width; y: mountainLayer.height }
+                PathLine { x: 0; y: mountainLayer.height }
+            }
+        }
+
+        // Soft atmospheric wash over the foothills (not a hard slab)
+        Rectangle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            height: parent.height * 0.55
+            gradient: Gradient {
+                GradientStop {
+                    position: 0.0
+                    color: Qt.rgba(root.mistCol.r, root.mistCol.g, root.mistCol.b, 0.0)
+                }
+                GradientStop {
+                    position: 0.55
+                    color: Qt.rgba(root.mistCol.r, root.mistCol.g, root.mistCol.b,
+                                   root.mistOpacity * 0.35)
+                }
+                GradientStop {
+                    position: 1.0
+                    color: Qt.rgba(root.mistCol.r, root.mistCol.g, root.mistCol.b,
+                                   root.mistOpacity * 0.55)
+                }
+            }
+        }
     }
 
     function applyLanes() {
@@ -220,11 +587,13 @@ Item {
     View3D {
         id: view
         anchors.fill: parent
+        z: 2
         camera: sceneCamera
 
         environment: SceneEnvironment {
-            backgroundMode: SceneEnvironment.Color
-            clearColor: "#0e1218"
+            // Let the 2D sky/sun behind this view show through empty pixels.
+            backgroundMode: SceneEnvironment.Transparent
+            clearColor: "#00000000"
             antialiasingMode: SceneEnvironment.NoAA
         }
 
@@ -243,12 +612,12 @@ Item {
         }
 
         DirectionalLight {
-            eulerRotation.x: -42
-            eulerRotation.y: 28
-            brightness: 1.35
-            color: "#fff4e8"
+            eulerRotation.x: -(22.0 + root.sunElev * 52.0)
+            eulerRotation.y: root.sunAzim
+            brightness: root.lightBright
+            color: root.lightCol
             castsShadow: false
-            ambientColor: "#4a5564"
+            ambientColor: root.ambientCol
         }
 
         // Ground: cinematic asphalt vs telemetry grid
@@ -258,7 +627,7 @@ Item {
             scale: Qt.vector3d(root.cinematicRoad ? 0.112 : 0.80, root.cinematicRoad ? 0.85 : 1.60, 1)
             position: Qt.vector3d(0, 0, root.cinematicRoad ? -40 : 0)
             materials: PrincipledMaterial {
-                baseColor: root.cinematicRoad ? "#101216" : "#222a35"
+                baseColor: root.cinematicRoad ? root.asphaltCol : "#222a35"
                 roughness: 0.95
                 metalness: 0.0
             }
@@ -269,10 +638,24 @@ Item {
             visible: root.cinematicRoad
             source: "#Rectangle"
             eulerRotation.x: -90
-            scale: Qt.vector3d(0.28, 0.85, 1)
-            position: Qt.vector3d(0, -0.01, -40)
+            scale: Qt.vector3d(0.32, 0.90, 1)
+            position: Qt.vector3d(0, -0.01, -42)
             materials: PrincipledMaterial {
-                baseColor: "#0a0c10"
+                baseColor: root.shoulderCol
+                roughness: 1.0
+            }
+        }
+
+        // Far ground fade into the mountain base (no bright slab)
+        Model {
+            visible: root.cinematicRoad
+            source: "#Rectangle"
+            eulerRotation.x: -90
+            scale: Qt.vector3d(0.48, 0.40, 1)
+            position: Qt.vector3d(0, -0.02, -72)
+            materials: PrincipledMaterial {
+                lighting: PrincipledMaterial.NoLighting
+                baseColor: root.mountainNearCol
                 roughness: 1.0
             }
         }
@@ -540,6 +923,7 @@ Item {
         anchors.top: parent.top
         anchors.margins: 8
         spacing: 4
+        z: 3
 
         Text {
             text: "QT QUICK 3D BEV"
@@ -587,6 +971,7 @@ Item {
         anchors.bottom: parent.bottom
         height: 22
         color: "#b0161b22"
+        z: 3
 
         Row {
             anchors.verticalCenter: parent.verticalCenter
@@ -599,6 +984,7 @@ Item {
                     { key: "reset", label: "Reset" },
                     { key: "road", label: root.cinematicRoad ? "Film" : "Grid" },
                     { key: "lanes", label: root.showLaneLines ? "Lanes" : "No lanes" },
+                    { key: "env", label: root.envLabel },
                     { key: "cal", label: "Cal" }
                 ]
                 Rectangle {
@@ -630,6 +1016,8 @@ Item {
                                 root.calibH = 1
                             } else if (key === "road") {
                                 root.cinematicRoad = !root.cinematicRoad
+                            } else if (key === "env") {
+                                root.cycleEnvMode()
                             } else if (key === "cal") {
                                 root.showCalib = !root.showCalib
                             } else {

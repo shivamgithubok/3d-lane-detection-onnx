@@ -36,7 +36,7 @@ import cv2
 import numpy as np
 
 # Fraction of source height trimmed from the top before the model resize.
-SKY_CROP_FRAC = 0.20
+SKY_CROP_FRAC = 0.00
 
 
 @dataclass(frozen=True)
