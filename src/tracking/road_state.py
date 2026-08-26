@@ -14,6 +14,7 @@ from src.utils.drivable_area import (
     EgoLanePairTracker,
     clip_lane_to_max_y,
     extract_ego_corridor_3d,
+    force_corridor_fixed_width,
     lane_mean_x,
     match_lane_by_x,
     pair_gap_m,
@@ -246,7 +247,16 @@ class RoadStateEstimator:
                 lane_width_m=self._locked_w,
             )
             left, right = self.corridor_ema.update(left, right)
-            if (
+            # Keep fill width fixed (target or locked) with constant margin —
+            # EKF / held / onesided PREDICTED must not balloon the corridor.
+            if bool(getattr(cfg, "CORRIDOR_FORCE_FIXED_WIDTH", True)):
+                paint_w = self._locked_w
+                if paint_w is None:
+                    paint_w = float(cfg.CORRIDOR_WIDTH_CLAMP_M)
+                left, right = force_corridor_fixed_width(
+                    left, right, width_m=paint_w
+                )
+            elif (
                 use_onesided
                 and left is not None
                 and right is not None

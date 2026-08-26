@@ -1,6 +1,6 @@
 import numpy as np
 from src.tracking.ekf_lane_tracker import EKFLaneTracker
-from src.inference.postprocess import ANCHOR_Y_STEPS
+from src.inference.postprocess import ANCHOR_Y_STEPS, active_y_steps, clip_proposal_max_y
 from src.inference import lane_filter_config as cfg
 
 
@@ -30,16 +30,41 @@ class LaneTrackerManager:
             cfg.EKF_REQUIRE_CONFIRMED if require_confirmed is None else require_confirmed
         )
 
+    def _y_steps(self):
+        return active_y_steps()
+
+    def _proposal_to_pts(self, prop):
+        """Visible 3D points, clipped to MAX_LANE_Y_M."""
+        y_steps = self._y_steps()
+        if isinstance(prop, np.ndarray) and prop.ndim == 1:
+            prop = clip_proposal_max_y(prop)
+            xs = prop[5 : 5 + len(ANCHOR_Y_STEPS)]
+            zs = prop[5 + len(ANCHOR_Y_STEPS) : 5 + 2 * len(ANCHOR_Y_STEPS)]
+            vis = prop[5 + 2 * len(ANCHOR_Y_STEPS) : 5 + 3 * len(ANCHOR_Y_STEPS)] > 0
+            keep = vis & (ANCHOR_Y_STEPS <= float(y_steps[-1]) + 1e-6)
+            if int(keep.sum()) < 2:
+                return None
+            return np.column_stack((xs[keep], ANCHOR_Y_STEPS[keep], zs[keep])).astype(np.float64)
+        pts = np.asarray(prop, dtype=np.float64)
+        if pts.ndim != 2 or pts.shape[1] != 3:
+            return None
+        pts = pts[pts[:, 1] <= float(y_steps[-1]) + 1e-6]
+        return pts if len(pts) >= 2 else None
+
     def _compute_distance(self, tracker_pts, proposal_pts):
-        """Compute mean BEV lateral distance between predicted tracker points and raw proposal points."""
-        diff_x = np.abs(tracker_pts[:, 0] - proposal_pts[:, 0])
-        return np.mean(diff_x)
+        """Mean BEV lateral distance on overlapping near-field Y samples."""
+        # Align by nearest Y to avoid length mismatch after Y-clip.
+        n = min(len(tracker_pts), len(proposal_pts))
+        if n < 2:
+            return 1e6
+        return float(np.mean(np.abs(tracker_pts[:n, 0] - proposal_pts[:n, 0])))
 
     def update(self, detected_proposals, dt=0.033, speed_mps=None):
         """
         Update all EKF trackers with new detected proposals.
         Returns list of confirmed smoothed 3D lane proposals.
         """
+        y_steps = self._y_steps()
         for trk in self.trackers:
             trk.predict(dt=dt)
 
@@ -48,14 +73,9 @@ class LaneTrackerManager:
         else:
             proposal_pts_list = []
             for prop in detected_proposals:
-                if isinstance(prop, np.ndarray) and prop.ndim == 1:
-                    xs = prop[5 : 5 + len(ANCHOR_Y_STEPS)]
-                    zs = prop[5 + len(ANCHOR_Y_STEPS) : 5 + 2 * len(ANCHOR_Y_STEPS)]
-                    ys = ANCHOR_Y_STEPS
-                    pts_3d = np.column_stack((xs, ys, zs))
-                else:
-                    pts_3d = prop
-                proposal_pts_list.append(pts_3d)
+                pts = self._proposal_to_pts(prop)
+                if pts is not None:
+                    proposal_pts_list.append(pts)
 
         num_trackers = len(self.trackers)
         num_proposals = len(proposal_pts_list)
@@ -66,7 +86,7 @@ class LaneTrackerManager:
         if num_trackers > 0 and num_proposals > 0:
             cost_matrix = np.zeros((num_trackers, num_proposals), dtype=np.float32)
             for i, trk in enumerate(self.trackers):
-                trk_pts = trk.get_lane_points(ANCHOR_Y_STEPS)
+                trk_pts = trk.get_lane_points(y_steps)
                 for j, prop_pts in enumerate(proposal_pts_list):
                     cost_matrix[i, j] = self._compute_distance(trk_pts, prop_pts)
 
@@ -109,8 +129,8 @@ class LaneTrackerManager:
         for trk in self.trackers:
             if self.require_confirmed:
                 if trk.is_confirmed:
-                    smoothed_lanes.append(trk.get_lane_points(ANCHOR_Y_STEPS))
+                    smoothed_lanes.append(trk.get_lane_points(y_steps))
             elif trk.is_confirmed or trk.hits >= max(1, self.confirm_hits // 2):
-                smoothed_lanes.append(trk.get_lane_points(ANCHOR_Y_STEPS))
+                smoothed_lanes.append(trk.get_lane_points(y_steps))
 
         return smoothed_lanes

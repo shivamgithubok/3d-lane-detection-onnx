@@ -56,3 +56,5 @@ models/*.pt
 src/inference/__pycache__
 src/ui/__pycache__
 src/utils/__pycache__
+scripts/debug/final_lane_ab.py
+scripts/debug/lane_param_sweep.py

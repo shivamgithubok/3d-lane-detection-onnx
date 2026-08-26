@@ -12,13 +12,19 @@ Suggested sweeps:
 """
 
 # --- Detection scoring / NMS (postprocess) ---
-CONF_THRESHOLD = 0.40          # was 0.20; raise if still too many FPs
+# Aggressive + shorter range on GRMN6694_360 (stride2, N=902):
+#   y50 + max_lanes 3 + |x|<=5.5  vs  mild y100/L4/x7:
+#   avgL 2.85→2.45, >=4 33%→0%, CONF 71.0%→73.4%, corr ~91% held.
+CONF_THRESHOLD = 0.43          # was 0.40; mild raise drops weak extras
 NMS_THRES_M = 2.0              # was 3.0; mean lateral distance (meters)
-MAX_LANES = 6                  # keep top-K by score after NMS (0 = unlimited)
+MAX_LANES = 3                  # was 4/6; ego L/R + one adjacent only
 MIN_VISIBLE_POINTS = 4         # was effectively 2; drop short/noisy segments
-MAX_ABS_MEAN_X_M = 8.0         # drop lanes farther than this from ego centerline
+MIN_ABS_MEAN_X_M = 0.0         # >0 rejects near-center ghosts but hurts ego pair
+MAX_ABS_MEAN_X_M = 5.5         # was 7/8; cut shoulder / far laterals
 MAX_LATERAL_JUMP_M = 2.5       # max |Δx| between adjacent visible Y samples
 MAX_ABS_SLOPE = 0.35           # max |Δx / Δy| over visible span (filters diagonals)
+# Only use / plot / track anchors with Y <= this (meters). Model still predicts to 100.
+MAX_LANE_Y_M = 50.0            # was 100; far anchors add noise more than signal
 
 # --- Synthetic lane interpolation (draw path) ---
 ENABLE_FILL_MISSING_LANES = False  # was always on; invents fake lines
@@ -44,6 +50,9 @@ EGO_LANE_WIDTH_TARGET_M = 3.7  # prefer pairs near standard lane width
 EGO_CORRIDOR_MARGIN_M = 0.24   # inset so fill sits inside ego paint, not on adjacent
 CORRIDOR_WIDTH_MAX_M = 3.9     # if ego pair is wider, shrink to target around center
 CORRIDOR_WIDTH_CLAMP_M = 3.7   # width used when clamping an oversized pair
+# Always draw the fill at this paint-to-paint width (then inset by margin),
+# including EKF / onesided PREDICTED fallback — stops the corridor from ballooning.
+CORRIDOR_FORCE_FIXED_WIDTH = True
 # Front fill starts past the ego hood (image bottom). Same idea as YOLO_BOTTOM_DROP_FRAC.
 CORRIDOR_IMAGE_HOOD_FRAC = 0.14
 CORRIDOR_Y_START_M = 4.0       # also skip 3D samples closer than this (hood / bumper)
@@ -75,7 +84,7 @@ ENABLE_ADAPTIVE_CONF = True
 DARK_LUMA_MAX = 125.0           # mean HSV-V of lower 2/3 of the model image
 CLAHE_CLIP = 2.5
 CLAHE_TILE = 8
-DARK_CONF_THRESHOLD = 0.35      # vs CONF_THRESHOLD; geometry filters still apply
+DARK_CONF_THRESHOLD = 0.38      # slightly below day conf for dark frames
 
 # --- CIPO / P1 in-path hysteresis ---
 CIPO_ENTER_HITS = 2            # frames inside before marking in_path

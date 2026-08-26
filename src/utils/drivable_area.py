@@ -550,13 +550,48 @@ def _clamp_ego_gap(xl, xr):
     gap = float(xr) - float(xl)
     if gap <= 0:
         return xl, xr
+    target = float(getattr(cfg, "CORRIDOR_WIDTH_CLAMP_M", cfg.EGO_LANE_WIDTH_TARGET_M))
+    # Fixed-width mode: always use the defined paint width (EKF-safe).
+    if bool(getattr(cfg, "CORRIDOR_FORCE_FIXED_WIDTH", False)):
+        center = 0.5 * (float(xl) + float(xr))
+        half = 0.5 * target
+        return center - half, center + half
     width_max = float(getattr(cfg, "CORRIDOR_WIDTH_MAX_M", 3.9))
     if gap <= width_max:
         return xl, xr
-    target = float(getattr(cfg, "CORRIDOR_WIDTH_CLAMP_M", cfg.EGO_LANE_WIDTH_TARGET_M))
     center = 0.5 * (float(xl) + float(xr))
     half = 0.5 * target
     return center - half, center + half
+
+
+def force_corridor_fixed_width(left_3d, right_3d, width_m=None, margin_m=None):
+    """Rebuild corridor edges from centerline at a fixed paint width, then inset.
+
+    Used so EKF / PREDICTED fallback cannot inflate the drivable fill beyond the
+    defined lane width. Returns (left, right) or (None, None).
+    """
+    if left_3d is None or right_3d is None:
+        return None, None
+    left = np.asarray(left_3d, dtype=np.float64)
+    right = np.asarray(right_3d, dtype=np.float64)
+    n = min(len(left), len(right))
+    if n < 2:
+        return None, None
+    left, right = left[:n].copy(), right[:n].copy()
+
+    paint_w = float(
+        cfg.CORRIDOR_WIDTH_CLAMP_M if width_m is None else width_m
+    )
+    if not np.isfinite(paint_w) or paint_w < 1.0:
+        paint_w = float(cfg.EGO_LANE_WIDTH_TARGET_M)
+    margin = float(cfg.EGO_CORRIDOR_MARGIN_M if margin_m is None else margin_m)
+    fill_w = max(0.5, paint_w - 2.0 * margin)
+    half = 0.5 * fill_w
+
+    center_x = 0.5 * (left[:, 0] + right[:, 0])
+    left[:, 0] = center_x - half
+    right[:, 0] = center_x + half
+    return left, right
 
 
 def extract_ego_corridor_3d(
