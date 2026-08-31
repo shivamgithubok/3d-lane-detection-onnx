@@ -58,6 +58,20 @@ CORRIDOR_IMAGE_HOOD_FRAC = 0.14
 CORRIDOR_Y_START_M = 4.0       # also skip 3D samples closer than this (hood / bumper)
 EGO_PAIR_HOLD_FRAMES = LANE_HOLD_FRAMES
 EGO_PAIR_MATCH_X_M = 1.25      # rematch held lanes to new proposals by |Δmean_x|
+# Occupancy-first ego pair: kill adjacent-lane latch.
+# A pair "occupies" ego when each boundary is at least INNER meters from X=0.
+# Center weight dominates; width is only a tie-break. Do not use |center|<1.2
+# as a hard cap — ADAS clips often have ~1.5 m camera-frame bias.
+EGO_OCCUPANCY_INNER_M = 0.40
+EGO_CENTER_SCORE_W = 3.0
+EGO_WIDTH_SCORE_W = 0.25
+EGO_REQUIRE_CONTAINS_0 = True  # never pick a pair that does not contain X=0
+# If no occupying pair exists, allow a weaker contains-0 pair (left<0<right)
+# whose |center| is still below FALLBACK_MAX_CENTER (neighbour latch is ~1.6–1.9 m).
+EGO_OCCUPANCY_FALLBACK_CONTAINS0 = True
+EGO_FALLBACK_MAX_CENTER_M = 1.59
+# closest-left + closest-right re-locks the adjacent lane; keep off.
+EGO_LEGACY_FALLBACK = False
 
 # --- One-sided ego reconstruct (P1) ---
 # If only one ego paint line is measured, rebuild the missing side from a

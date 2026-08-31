@@ -36,7 +36,13 @@ from src.inference.postprocess import postprocess_onnx_output
 from src.tracking.lane_frame import LaneFrameModel
 from src.tracking.road_state import RoadStateEstimator
 from src.utils.camera_transform import CameraTransform
-from src.utils.drivable_area import find_ego_lanes, lane_mean_x, pair_gap_m
+from src.utils.drivable_area import (
+    find_ego_lanes,
+    lane_mean_x,
+    pair_gap_m,
+    pair_occupancy_tier,
+    ego_pair_score,
+)
 
 INPUT_H, INPUT_W = 360, 480
 ENGINE_PATH = "models/anchor3dlane_raw.engine"
@@ -94,9 +100,10 @@ def all_width_pairs(proposals):
                 continue
             center = 0.5 * (ml + mr)
             contains0 = ml < 0.0 < mr
-            score = abs(gap - cfg.EGO_LANE_WIDTH_TARGET_M) + 0.75 * abs(center)
+            tier = pair_occupancy_tier(ml, mr)
+            score = ego_pair_score(gap, center, cfg.EGO_LANE_WIDTH_TARGET_M)
             out.append({"ml": ml, "mr": mr, "gap": gap, "center": center,
-                        "contains0": contains0, "score": score})
+                        "contains0": contains0, "tier": tier, "score": score})
     return out
 
 
@@ -111,7 +118,7 @@ def dump_frame(path, frame, st, pairs, note):
     )
     y = 108
     for p in pairs[:6]:
-        mark = "C0" if p["contains0"] else "  "
+        mark = "Oc" if p.get("tier") == 0 else ("C0" if p["contains0"] else "  ")
         line = (f"{mark} L={p['ml']:+.2f} R={p['mr']:+.2f} "
                 f"c={p['center']:+.2f} w={p['gap']:.2f} sc={p['score']:.2f}")
         cv2.putText(vis, line, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 255, 180), 1)

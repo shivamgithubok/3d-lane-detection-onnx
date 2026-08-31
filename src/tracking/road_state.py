@@ -18,6 +18,7 @@ from src.utils.drivable_area import (
     lane_mean_x,
     match_lane_by_x,
     pair_gap_m,
+    pair_occupancy_ok,
     reconstruct_opposite_boundary,
     select_onesided_ego_lane,
 )
@@ -156,18 +157,22 @@ class RoadStateEstimator:
             vis_clip = visible
         if side == "left":
             ego_left, ego_right = vis_clip, recon
-            mx = lane_mean_x(visible)
-            if mx is not None:
-                self._last_left_x = mx
-                self._last_right_x = mx + self._locked_w
             missing = "right"
         else:
             ego_left, ego_right = recon, vis_clip
-            mx = lane_mean_x(visible)
-            if mx is not None:
+            missing = "left"
+        mx_l = lane_mean_x(ego_left)
+        mx_r = lane_mean_x(ego_right)
+        if not pair_occupancy_ok(mx_l, mx_r):
+            return False, None, None, None, None, None
+        mx = lane_mean_x(visible)
+        if mx is not None:
+            if side == "left":
+                self._last_left_x = mx
+                self._last_right_x = mx + self._locked_w
+            else:
                 self._last_right_x = mx
                 self._last_left_x = mx - self._locked_w
-            missing = "left"
         return True, ego_left, ego_right, recon, side, missing
 
     def update(self, raw_lanes: Optional[Sequence[np.ndarray]], dt: float, speed_mps: Optional[float] = None) -> RoadState:

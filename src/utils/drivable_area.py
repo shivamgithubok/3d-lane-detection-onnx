@@ -221,6 +221,55 @@ def _legacy_ego_lanes(proposals, anchor_len=20):
     return ego_left, ego_right
 
 
+def pair_occupancy_tier(left_x, right_x, inner_m=None):
+    """How strongly a pair contains the ego lateral origin X=0.
+
+    Returns:
+      0  occupies — each side is at least inner_m from X=0
+      1  contains0 — left < 0 < right, but one side is close to the origin
+      None  does not contain the car (adjacent lane / same-side pair)
+    """
+    if left_x is None or right_x is None:
+        return None
+    ml, mr = float(left_x), float(right_x)
+    if not (ml < mr):
+        return None
+    inner = float(cfg.EGO_OCCUPANCY_INNER_M if inner_m is None else inner_m)
+    if ml <= -inner and mr >= inner:
+        return 0
+    if ml < 0.0 < mr:
+        return 1
+    return None
+
+
+def _fallback_center_ok(left_x, right_x):
+    """Contains-0 fallback must not be a neighbour-wide offset."""
+    max_c = float(getattr(cfg, "EGO_FALLBACK_MAX_CENTER_M", 1.59))
+    if not np.isfinite(max_c) or max_c <= 0:
+        return True
+    return abs(0.5 * (float(left_x) + float(right_x))) <= max_c
+
+
+def pair_occupancy_ok(left_x, right_x, allow_contains0=None, inner_m=None):
+    """True when the pair is allowed as an ego corridor."""
+    tier = pair_occupancy_tier(left_x, right_x, inner_m=inner_m)
+    if tier is None:
+        return False
+    if tier == 0:
+        return True
+    if allow_contains0 is None:
+        allow_contains0 = bool(getattr(cfg, "EGO_OCCUPANCY_FALLBACK_CONTAINS0", False))
+    if not allow_contains0:
+        return False
+    return _fallback_center_ok(left_x, right_x)
+
+
+def ego_pair_score(gap, center, width_target):
+    cw = float(getattr(cfg, "EGO_CENTER_SCORE_W", 3.0))
+    ww = float(getattr(cfg, "EGO_WIDTH_SCORE_W", 0.25))
+    return cw * abs(float(center)) + ww * abs(float(gap) - float(width_target))
+
+
 def find_ego_lanes(
     proposals,
     anchor_len=20,
@@ -229,14 +278,13 @@ def find_ego_lanes(
     width_target=None,
 ):
     """
-    P0 ego pair: pick left/right boundaries that form ONE real lane.
+    Pick the left/right paint that forms the ego lane (occupancy first).
 
-    Prefer pairs that:
-      1. Bracket ego center (left_x < 0 < right_x), and
-      2. Have gap in [width_min, width_max] (~one lane), closest to width_target,
-      3. Have corridor center closest to 0.
-
-    Falls back to legacy closest-left / closest-right if no width-valid pair.
+    1. Width-valid pairs only (~one lane).
+    2. Occupying pairs (left <= -INNER, right >= +INNER) beat contains-0 pairs.
+    3. Inside a tier, smaller |center| wins; width is a weak tie-break.
+    4. Never return a same-side / non-containing pair. Legacy closest-L/R
+       is off by default — it re-locks the adjacent lane.
     """
     if proposals is None or len(proposals) == 0:
         return None, None
@@ -244,6 +292,9 @@ def find_ego_lanes(
     width_min = cfg.EGO_LANE_WIDTH_MIN_M if width_min is None else width_min
     width_max = cfg.EGO_LANE_WIDTH_MAX_M if width_max is None else width_max
     width_target = cfg.EGO_LANE_WIDTH_TARGET_M if width_target is None else width_target
+    require_c0 = bool(getattr(cfg, "EGO_REQUIRE_CONTAINS_0", True))
+    allow_c0 = bool(getattr(cfg, "EGO_OCCUPANCY_FALLBACK_CONTAINS0", False))
+    use_legacy = bool(getattr(cfg, "EGO_LEGACY_FALLBACK", False))
 
     lanes = []
     for lane in proposals:
@@ -252,29 +303,43 @@ def find_ego_lanes(
             continue
         lanes.append((mx, lane))
     if len(lanes) < 2:
-        return _legacy_ego_lanes(proposals, anchor_len)
+        if use_legacy:
+            return _legacy_ego_lanes(proposals, anchor_len)
+        return None, None
 
     lanes.sort(key=lambda t: t[0])
-    best = None  # (score, left, right)
+    best = None  # (tier, score, left, right)
     for i in range(len(lanes)):
         for j in range(i + 1, len(lanes)):
             ml, left = lanes[i]
             mr, right = lanes[j]
-            # Must bracket ego (allow slight straddle tolerance)
-            if not (ml < 0.35 and mr > -0.35 and ml < mr):
+            if ml >= mr:
                 continue
+            tier = pair_occupancy_tier(ml, mr)
+            if tier is None:
+                if require_c0:
+                    continue
+                # Soft historic bracket (same-side neighbour). Keep worse than c0.
+                if not (ml < 0.35 and mr > -0.35):
+                    continue
+                tier = 2
+            elif tier == 1:
+                if not allow_c0 or not _fallback_center_ok(ml, mr):
+                    continue
             gap = pair_gap_m(left, right, anchor_len)
             if gap is None or gap < width_min or gap > width_max:
                 continue
             center = 0.5 * (ml + mr)
-            # Lower is better: prefer target width + centered corridor
-            score = abs(gap - width_target) + 0.75 * abs(center)
-            if best is None or score < best[0]:
-                best = (score, left, right)
+            score = ego_pair_score(gap, center, width_target)
+            cand = (tier, score, left, right)
+            if best is None or cand[0] < best[0] or (cand[0] == best[0] and cand[1] < best[1]):
+                best = cand
 
     if best is not None:
-        return best[1], best[2]
-    return _legacy_ego_lanes(proposals, anchor_len)
+        return best[2], best[3]
+    if use_legacy:
+        return _legacy_ego_lanes(proposals, anchor_len)
+    return None, None
 
 
 class EgoLanePairTracker:
@@ -317,14 +382,20 @@ class EgoLanePairTracker:
     def _match_lane(self, target_x, proposals, anchor_len=20, exclude=None):
         return match_lane_by_x(target_x, proposals, self.match_x_m, anchor_len, exclude=exclude)
 
+    def _occupancy_ok(self, left_x, right_x):
+        return pair_occupancy_ok(left_x, right_x)
+
     def _set_pair(self, left, right, source, held, anchor_len=20):
+        left_x = lane_mean_x(left, anchor_len)
+        right_x = lane_mean_x(right, anchor_len)
+        if not self._occupancy_ok(left_x, right_x):
+            return None
         self._left, self._right = left, right
-        self._left_x = lane_mean_x(left, anchor_len)
-        self._right_x = lane_mean_x(right, anchor_len)
+        self._left_x, self._right_x = left_x, right_x
         gap = pair_gap_m(left, right, anchor_len)
         center = None
-        if self._left_x is not None and self._right_x is not None:
-            center = 0.5 * (self._left_x + self._right_x)
+        if left_x is not None and right_x is not None:
+            center = 0.5 * (left_x + right_x)
         self.last_meta = {
             "source": source,
             "gap_m": gap,
@@ -340,7 +411,11 @@ class EgoLanePairTracker:
     def update(self, proposals, anchor_len=20):
         if proposals is None or len(proposals) == 0:
             self._miss += 1
-            if self._left is not None and self._miss <= self.hold_frames:
+            if (
+                self._left is not None
+                and self._miss <= self.hold_frames
+                and self._occupancy_ok(self._left_x, self._right_x)
+            ):
                 self.last_meta["held"] = True
                 self.last_meta["source"] = "hold_empty"
                 return self._left, self._right
@@ -356,7 +431,9 @@ class EgoLanePairTracker:
         if cand_l is not None and cand_r is not None:
             gap = pair_gap_m(cand_l, cand_r, anchor_len)
             if gap is not None and self.width_min <= gap <= self.width_max:
-                return self._set_pair(cand_l, cand_r, "width_pair", False, anchor_len)
+                out = self._set_pair(cand_l, cand_r, "width_pair", False, anchor_len)
+                if out is not None:
+                    return out
 
         # Rematch last good lateral positions into this frame's proposals
         if self._left_x is not None and self._right_x is not None:
@@ -368,24 +445,24 @@ class EgoLanePairTracker:
                 if gap is not None and self.width_min * 0.85 <= gap <= self.width_max * 1.15:
                     self._miss += 1
                     if self._miss <= self.hold_frames:
-                        return self._set_pair(rem_l, rem_r, "hold_rematch", True, anchor_len)
+                        out = self._set_pair(rem_l, rem_r, "hold_rematch", True, anchor_len)
+                        if out is not None:
+                            return out
+                    self._miss -= 1
 
-            # Rematch failed / too wide: keep previous pair objects for a few frames
+            # Rematch failed / too wide / occupancy fail: keep previous pair briefly
             self._miss += 1
-            if self._miss <= self.hold_frames:
+            if (
+                self._miss <= self.hold_frames
+                and self._occupancy_ok(self._left_x, self._right_x)
+            ):
                 self.last_meta["held"] = True
                 self.last_meta["source"] = "hold_stale"
                 return self._left, self._right
 
-        # Soft fallback: legacy pair only when we have no held corridor yet
-        if cand_l is not None and cand_r is not None and self._left is None:
-            gap = pair_gap_m(cand_l, cand_r, anchor_len)
-            # Still reject obviously multi-lane spans even as cold start
-            if gap is not None and gap <= self.width_max * 1.25:
-                return self._set_pair(cand_l, cand_r, "legacy_fallback", False, anchor_len)
-
         self.reset()
         return None, None
+
 
 
 def find_outer_lanes(proposals, anchor_len=20, max_abs_x=9.0):

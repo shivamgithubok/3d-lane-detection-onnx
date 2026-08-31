@@ -53,6 +53,14 @@ DASH_PERIOD_M = DASH_LEN_M + DASH_GAP_M
 # "crossing" look) instead of flying off the canvas.
 EGO_OFFSET_MARGIN_M = 0.35
 EGO_YAW_MAX_DEG = 15.0
+# BEV render: keep the ego car sprite on the lane centerline. Offset is still
+# tracked internally for traffic/lane-frame math; only the drawn car is pinned.
+# Without this, a lane change (or a wrong ego-pair latch) slides the car to the
+# edge of the ribbon and looks like it "went into the next lane".
+BEV_PIN_EGO_TO_LANE_CENTER = True
+# If |c0| jumps by more than this, treat as a lane re-lock and snap pose so the
+# EMA does not drag the car across the ribbon for several frames.
+LANE_RELOCK_SNAP_M = 1.2
 
 
 class LaneFrameModel:
@@ -166,6 +174,11 @@ class LaneFrameModel:
             self._c = c
             self._half_w = half_w
         else:
+            # Lane change / pair re-lock: c0 jumps by ~one lane. Snap pose so the
+            # car does not slide to the far edge of the ribbon during EMA catch-up.
+            if abs(float(c[0]) - float(self._c[0])) >= LANE_RELOCK_SNAP_M:
+                self._c[0] = float(c[0])
+                self._c[1] = float(c[1])
             ap, ac, aw = self.pose_alpha, self.curv_alpha, self.width_alpha
             self._c[0] = (1.0 - ap) * self._c[0] + ap * c[0]
             self._c[1] = (1.0 - ap) * self._c[1] + ap * c[1]
@@ -197,7 +210,13 @@ class LaneFrameModel:
         return ys, xs + float(offset_m)
 
     def ego_pose(self) -> Tuple[float, float]:
-        """(lateral offset m, heading rad) of ego within its lane, clamped."""
+        """(lateral offset m, heading rad) of ego within its lane, clamped.
+
+        When BEV_PIN_EGO_TO_LANE_CENTER is on, returns (0, 0) so the car sprite
+        stays in the middle of the locked lane ribbon.
+        """
+        if BEV_PIN_EGO_TO_LANE_CENTER:
+            return 0.0, 0.0
         if self._c is None:
             return 0.0, 0.0
         lim = self._half_w + EGO_OFFSET_MARGIN_M

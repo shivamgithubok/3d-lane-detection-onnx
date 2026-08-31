@@ -256,8 +256,8 @@ def draw_front_view_cipo(
             if ego_left  is not None and np.array_equal(lane, ego_left):  ego_l_idx = idx
             if ego_right is not None and np.array_equal(lane, ego_right): ego_r_idx = idx
 
+        no_ego_lock = ego_l_idx is None and ego_r_idx is None
         for idx, lane in enumerate(sorted_lanes):
-            # Draw ego + adjacent; skip far clutter
             is_ego = (
                 (ego_left is not None and np.array_equal(lane, ego_left))
                 or (ego_right is not None and np.array_equal(lane, ego_right))
@@ -266,9 +266,12 @@ def draw_front_view_cipo(
                 (ego_l_idx is not None and idx == ego_l_idx - 1)
                 or (ego_r_idx is not None and idx == ego_r_idx + 1)
             )
-            # Hide ego polylines — corridor fill already shows the ego path.
-            # Keep adjacent lanes live so next-lane context stays dynamic.
-            if not is_adj:
+            # Corridor fill already shows the ego path — hide those polylines
+            # only while a corridor is actually on screen. If occupancy drops
+            # the fill, keep detected paint visible so lanes do not vanish.
+            if is_ego and road_state_valid:
+                continue
+            if not is_ego and not is_adj and not no_ego_lock:
                 continue
             lane_color, thickness = (60, 150, 210), 1
 

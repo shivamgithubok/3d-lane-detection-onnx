@@ -954,8 +954,7 @@ Item {
                   : (egoCar.status === RuntimeLoader.Success
                      ? (root.laneHeld ? "lane held — dead reckoning"
                         : (root.laneValid
-                           ? ("lane locked  " + root.egoX.toFixed(2) + " m  "
-                              + root.egoYawDeg.toFixed(1) + "°")
+                           ? "lane locked — ego centered"
                            : "no lane"))
                      : root.overlayHint)
             color: egoCar.status === RuntimeLoader.Error ? "#f85149"
