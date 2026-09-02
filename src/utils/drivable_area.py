@@ -26,17 +26,35 @@ def parse_lane_components(lane, anchor_len=20):
     return xs, ys, zs, vis
 
 
-def lane_mean_x(lane, anchor_len=20, near_only=True):
-    """Mean lateral X (m). Prefer near anchors — more stable for ego association."""
+def lane_mean_x(lane, anchor_len=20, near_only=True, max_y_m=None):
+    """Mean lateral X (m) in the model/camera frame.
+
+    Prefer near anchors — more stable for ego association. `max_y_m` overrides
+    the default 40 m near cap (ego pairing uses EGO_PAIR_NEAR_Y_M).
+    """
     xs, ys, zs, vis = parse_lane_components(lane, anchor_len)
     if int(vis.sum()) < 2:
         return None
-    if near_only and len(ys) >= 4:
-        # Prefer Y <= 40 m when enough points (reduces far-curve bias)
-        near = vis & (ys <= 40.0)
+    if near_only and len(ys) >= 2:
+        y_cap = 40.0 if max_y_m is None else float(max_y_m)
+        near = vis & (ys <= y_cap + 1e-6)
         if int(near.sum()) >= 2:
             return float(np.mean(xs[near]))
     return float(np.mean(xs[vis]))
+
+
+def lane_assoc_x(lane, anchor_len=20):
+    """Near-field camera-frame X used for ego occupancy and sticky rematch."""
+    y_cap = float(getattr(cfg, "EGO_PAIR_NEAR_Y_M", 15.0))
+    return lane_mean_x(lane, anchor_len, near_only=True, max_y_m=y_cap)
+
+
+def to_vehicle_x(x_cam):
+    """Camera/model lateral X → vehicle-centerline X (does not mutate 3D)."""
+    if x_cam is None:
+        return None
+    off = float(getattr(cfg, "CAMERA_LATERAL_OFFSET_M", 0.0))
+    return float(x_cam) - off
 
 
 def _aligned_gap_m(xs_l, ys_l, vis_l, xs_r, ys_r, vis_r):
@@ -100,7 +118,7 @@ def clip_lane_to_max_y(lane, max_y_m, anchor_len=20, min_points=3):
     return pts.astype(np.float32)
 
 
-def match_lane_by_x(target_x, proposals, match_x_m, anchor_len=20, exclude=None):
+def match_lane_by_x(target_x, proposals, match_x_m, anchor_len=20, exclude=None, max_y_m=None):
     """Nearest proposal whose mean X is within match_x_m of target_x."""
     if target_x is None or proposals is None:
         return None
@@ -108,7 +126,7 @@ def match_lane_by_x(target_x, proposals, match_x_m, anchor_len=20, exclude=None)
     for lane in proposals:
         if exclude is not None and lane is exclude:
             continue
-        mx = lane_mean_x(lane, anchor_len)
+        mx = lane_mean_x(lane, anchor_len, max_y_m=max_y_m)
         if mx is None:
             continue
         d = abs(mx - float(target_x))
@@ -222,17 +240,18 @@ def _legacy_ego_lanes(proposals, anchor_len=20):
 
 
 def pair_occupancy_tier(left_x, right_x, inner_m=None):
-    """How strongly a pair contains the ego lateral origin X=0.
+    """How strongly a pair contains the ego lateral origin in vehicle frame.
 
+    `left_x` / `right_x` are camera-frame means; offset is applied here.
     Returns:
-      0  occupies — each side is at least inner_m from X=0
+      0  occupies — each side is at least inner_m from vehicle X=0
       1  contains0 — left < 0 < right, but one side is close to the origin
       None  does not contain the car (adjacent lane / same-side pair)
     """
     if left_x is None or right_x is None:
         return None
-    ml, mr = float(left_x), float(right_x)
-    if not (ml < mr):
+    ml, mr = to_vehicle_x(left_x), to_vehicle_x(right_x)
+    if ml is None or mr is None or not (ml < mr):
         return None
     inner = float(cfg.EGO_OCCUPANCY_INNER_M if inner_m is None else inner_m)
     if ml <= -inner and mr >= inner:
@@ -243,11 +262,12 @@ def pair_occupancy_tier(left_x, right_x, inner_m=None):
 
 
 def _fallback_center_ok(left_x, right_x):
-    """Contains-0 fallback must not be a neighbour-wide offset."""
+    """Contains-0 fallback must not be a neighbour-wide offset (vehicle frame)."""
     max_c = float(getattr(cfg, "EGO_FALLBACK_MAX_CENTER_M", 1.59))
     if not np.isfinite(max_c) or max_c <= 0:
         return True
-    return abs(0.5 * (float(left_x) + float(right_x))) <= max_c
+    c = 0.5 * (to_vehicle_x(left_x) + to_vehicle_x(right_x))
+    return abs(c) <= max_c
 
 
 def pair_occupancy_ok(left_x, right_x, allow_contains0=None, inner_m=None):
@@ -298,7 +318,7 @@ def find_ego_lanes(
 
     lanes = []
     for lane in proposals:
-        mx = lane_mean_x(lane, anchor_len)
+        mx = lane_assoc_x(lane, anchor_len)
         if mx is None:
             continue
         lanes.append((mx, lane))
@@ -329,7 +349,7 @@ def find_ego_lanes(
             gap = pair_gap_m(left, right, anchor_len)
             if gap is None or gap < width_min or gap > width_max:
                 continue
-            center = 0.5 * (ml + mr)
+            center = 0.5 * (to_vehicle_x(ml) + to_vehicle_x(mr))
             score = ego_pair_score(gap, center, width_target)
             cand = (tier, score, left, right)
             if best is None or cand[0] < best[0] or (cand[0] == best[0] and cand[1] < best[1]):
@@ -343,11 +363,12 @@ def find_ego_lanes(
 
 
 class EgoLanePairTracker:
-    """
-    Temporal hold for ego left/right during lane-change / flicker.
+    """Sticky −1/+1 ego boundaries with occupancy gating and lane-change dwell.
 
-    Accepts a fresh width-valid pair immediately; otherwise rematches the
-    last good pair into the current proposal set for up to hold_frames.
+    Cold start uses occupancy-first `find_ego_lanes`. After a lock, the same
+    physical paint is rematched by near-field X. A new occupying pair is
+    accepted only after its corridor center jumps by ~one lane and stays
+    there for LANE_CHANGE_DWELL_FRAMES.
     """
 
     def __init__(
@@ -361,41 +382,49 @@ class EgoLanePairTracker:
         self.match_x_m = cfg.EGO_PAIR_MATCH_X_M if match_x_m is None else match_x_m
         self.width_min = cfg.EGO_LANE_WIDTH_MIN_M if width_min is None else width_min
         self.width_max = cfg.EGO_LANE_WIDTH_MAX_M if width_max is None else width_max
-        self._left = None
-        self._right = None
-        self._left_x = None
-        self._right_x = None
-        self._miss = 0
-        self.last_meta = {
-            "source": "none",
-            "gap_m": None,
-            "center_m": None,
-            "held": False,
-        }
+        self.reset()
 
     def reset(self):
         self._left = self._right = None
         self._left_x = self._right_x = None
         self._miss = 0
+        self._lc_dwell = 0
         self.last_meta = {"source": "none", "gap_m": None, "center_m": None, "held": False}
 
+    def _assoc_y(self):
+        return float(getattr(cfg, "EGO_PAIR_NEAR_Y_M", 15.0))
+
     def _match_lane(self, target_x, proposals, anchor_len=20, exclude=None):
-        return match_lane_by_x(target_x, proposals, self.match_x_m, anchor_len, exclude=exclude)
+        return match_lane_by_x(
+            target_x, proposals, self.match_x_m, anchor_len,
+            exclude=exclude, max_y_m=self._assoc_y(),
+        )
 
     def _occupancy_ok(self, left_x, right_x):
         return pair_occupancy_ok(left_x, right_x)
 
+    def _pair_center(self, left_x, right_x):
+        if left_x is None or right_x is None:
+            return None
+        return 0.5 * (to_vehicle_x(left_x) + to_vehicle_x(right_x))
+
+    def _width_ok(self, left, right, anchor_len=20, lo=None, hi=None):
+        gap = pair_gap_m(left, right, anchor_len)
+        if gap is None:
+            return False, None
+        lo = self.width_min if lo is None else lo
+        hi = self.width_max if hi is None else hi
+        return (lo <= gap <= hi), gap
+
     def _set_pair(self, left, right, source, held, anchor_len=20):
-        left_x = lane_mean_x(left, anchor_len)
-        right_x = lane_mean_x(right, anchor_len)
+        left_x = lane_assoc_x(left, anchor_len)
+        right_x = lane_assoc_x(right, anchor_len)
         if not self._occupancy_ok(left_x, right_x):
             return None
         self._left, self._right = left, right
         self._left_x, self._right_x = left_x, right_x
-        gap = pair_gap_m(left, right, anchor_len)
-        center = None
-        if left_x is not None and right_x is not None:
-            center = 0.5 * (left_x + right_x)
+        _, gap = self._width_ok(left, right, anchor_len, lo=0.0, hi=1e9)
+        center = self._pair_center(left_x, right_x)
         self.last_meta = {
             "source": source,
             "gap_m": gap,
@@ -403,24 +432,36 @@ class EgoLanePairTracker:
             "held": held,
             "left_x": self._left_x,
             "right_x": self._right_x,
+            "lc_dwell": self._lc_dwell,
         }
         if not held:
             self._miss = 0
         return left, right
 
+    def _hold_stale(self, source):
+        self._miss += 1
+        if (
+            self._left is not None
+            and self._miss <= self.hold_frames
+            and self._occupancy_ok(self._left_x, self._right_x)
+        ):
+            self.last_meta["held"] = True
+            self.last_meta["source"] = source
+            self.last_meta["lc_dwell"] = self._lc_dwell
+            return self._left, self._right
+        self.reset()
+        return None, None
+
     def update(self, proposals, anchor_len=20):
+        sticky = bool(getattr(cfg, "EGO_STICKY_INDEX", True))
+        lc_center = float(getattr(cfg, "LANE_CHANGE_CENTER_M", 1.2))
+        lc_dwell_n = int(getattr(cfg, "LANE_CHANGE_DWELL_FRAMES", 8))
+
         if proposals is None or len(proposals) == 0:
-            self._miss += 1
-            if (
-                self._left is not None
-                and self._miss <= self.hold_frames
-                and self._occupancy_ok(self._left_x, self._right_x)
-            ):
-                self.last_meta["held"] = True
-                self.last_meta["source"] = "hold_empty"
-                return self._left, self._right
-            self.reset()
-            return None, None
+            if self._left is None:
+                self.reset()
+                return None, None
+            return self._hold_stale("hold_empty")
 
         cand_l, cand_r = find_ego_lanes(
             proposals,
@@ -428,41 +469,63 @@ class EgoLanePairTracker:
             width_min=self.width_min,
             width_max=self.width_max,
         )
+        cand_ok = False
+        cand_c = None
         if cand_l is not None and cand_r is not None:
-            gap = pair_gap_m(cand_l, cand_r, anchor_len)
-            if gap is not None and self.width_min <= gap <= self.width_max:
-                out = self._set_pair(cand_l, cand_r, "width_pair", False, anchor_len)
-                if out is not None:
-                    return out
+            w_ok, _ = self._width_ok(cand_l, cand_r, anchor_len)
+            cx = lane_assoc_x(cand_l, anchor_len)
+            cy = lane_assoc_x(cand_r, anchor_len)
+            cand_ok = w_ok and self._occupancy_ok(cx, cy)
+            if cand_ok:
+                cand_c = self._pair_center(cx, cy)
 
-        # Rematch last good lateral positions into this frame's proposals
-        if self._left_x is not None and self._right_x is not None:
-            rem_l = self._match_lane(self._left_x, proposals, anchor_len)
-            rem_r = self._match_lane(self._right_x, proposals, anchor_len, exclude=rem_l)
-            if rem_l is not None and rem_r is not None:
-                gap = pair_gap_m(rem_l, rem_r, anchor_len)
-                # Keep held corridor only if rematch is still ~one lane (or slightly wide)
-                if gap is not None and self.width_min * 0.85 <= gap <= self.width_max * 1.15:
-                    self._miss += 1
-                    if self._miss <= self.hold_frames:
-                        out = self._set_pair(rem_l, rem_r, "hold_rematch", True, anchor_len)
-                        if out is not None:
-                            return out
-                    self._miss -= 1
+        locked = self._left_x is not None and self._right_x is not None
+        if not sticky or not locked:
+            self._lc_dwell = 0
+            if cand_ok:
+                return self._set_pair(cand_l, cand_r, "width_pair", False, anchor_len)
+            self.reset()
+            return None, None
 
-            # Rematch failed / too wide / occupancy fail: keep previous pair briefly
-            self._miss += 1
-            if (
-                self._miss <= self.hold_frames
-                and self._occupancy_ok(self._left_x, self._right_x)
-            ):
-                self.last_meta["held"] = True
-                self.last_meta["source"] = "hold_stale"
-                return self._left, self._right
+        rem_l = self._match_lane(self._left_x, proposals, anchor_len)
+        rem_r = self._match_lane(self._right_x, proposals, anchor_len, exclude=rem_l)
+        rem_ok = False
+        if rem_l is not None and rem_r is not None:
+            w_ok, _ = self._width_ok(
+                rem_l, rem_r, anchor_len,
+                lo=self.width_min * 0.85, hi=self.width_max * 1.15,
+            )
+            rx = lane_assoc_x(rem_l, anchor_len)
+            ry = lane_assoc_x(rem_r, anchor_len)
+            rem_ok = w_ok and self._occupancy_ok(rx, ry)
 
-        self.reset()
-        return None, None
+        lock_c = self._pair_center(self._left_x, self._right_x)
+        jumping = (
+            cand_ok and cand_c is not None and lock_c is not None
+            and abs(cand_c - lock_c) >= lc_center
+        )
+        if jumping:
+            self._lc_dwell += 1
+        else:
+            self._lc_dwell = 0
 
+        if jumping and self._lc_dwell >= lc_dwell_n:
+            out = self._set_pair(cand_l, cand_r, "lane_change", False, anchor_len)
+            if out is not None:
+                self._lc_dwell = 0
+                return out
+
+        if rem_ok:
+            out = self._set_pair(rem_l, rem_r, "sticky", False, anchor_len)
+            if out is not None:
+                return out
+
+        if cand_ok and not jumping:
+            out = self._set_pair(cand_l, cand_r, "width_pair", False, anchor_len)
+            if out is not None:
+                return out
+
+        return self._hold_stale("hold_stale")
 
 
 def find_outer_lanes(proposals, anchor_len=20, max_abs_x=9.0):

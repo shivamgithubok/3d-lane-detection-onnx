@@ -58,6 +58,13 @@ CORRIDOR_IMAGE_HOOD_FRAC = 0.14
 CORRIDOR_Y_START_M = 4.0       # also skip 3D samples closer than this (hood / bumper)
 EGO_PAIR_HOLD_FRAMES = LANE_HOLD_FRAMES
 EGO_PAIR_MATCH_X_M = 1.25      # rematch held lanes to new proposals by |Δmean_x|
+# Camera X is the optical axis, not the vehicle centerline. Subtract this
+# (meters, + = camera right of center) before occupancy / scoring. Do not
+# bake it into P — 3D outputs stay in the model camera frame.
+CAMERA_LATERAL_OFFSET_M = 0.0
+# Ego association / occupancy uses only this near Y band (m). Anchor grid is
+# 5 m steps, so 15 m = three samples; 8 m would be a single point.
+EGO_PAIR_NEAR_Y_M = 15.0
 # Occupancy-first ego pair: kill adjacent-lane latch.
 # A pair "occupies" ego when each boundary is at least INNER meters from X=0.
 # Center weight dominates; width is only a tie-break. Do not use |center|<1.2
@@ -72,6 +79,11 @@ EGO_OCCUPANCY_FALLBACK_CONTAINS0 = True
 EGO_FALLBACK_MAX_CENTER_M = 1.59
 # closest-left + closest-right re-locks the adjacent lane; keep off.
 EGO_LEGACY_FALLBACK = False
+# Sticky −1/+1 roles: rematch last ego paint; find_ego_lanes only on cold
+# start or after a dwelled lane-change (center jump).
+EGO_STICKY_INDEX = True
+LANE_CHANGE_CENTER_M = 1.2     # |Δcorridor center| (vehicle frame) to start re-index
+LANE_CHANGE_DWELL_FRAMES = 8   # ~0.27 s at 30 fps
 
 # --- One-sided ego reconstruct (P1) ---
 # If only one ego paint line is measured, rebuild the missing side from a

@@ -15,7 +15,7 @@ from src.utils.drivable_area import (
     clip_lane_to_max_y,
     extract_ego_corridor_3d,
     force_corridor_fixed_width,
-    lane_mean_x,
+    lane_assoc_x,
     match_lane_by_x,
     pair_gap_m,
     pair_occupancy_ok,
@@ -109,8 +109,8 @@ class RoadStateEstimator:
         self._onesided_age = 0
 
     def _remember_pair_x(self, left, right) -> None:
-        mx_l = lane_mean_x(left)
-        mx_r = lane_mean_x(right)
+        mx_l = lane_assoc_x(left)
+        mx_r = lane_assoc_x(right)
         if mx_l is not None:
             self._last_left_x = mx_l
         if mx_r is not None:
@@ -161,11 +161,11 @@ class RoadStateEstimator:
         else:
             ego_left, ego_right = recon, vis_clip
             missing = "left"
-        mx_l = lane_mean_x(ego_left)
-        mx_r = lane_mean_x(ego_right)
+        mx_l = lane_assoc_x(ego_left)
+        mx_r = lane_assoc_x(ego_right)
         if not pair_occupancy_ok(mx_l, mx_r):
             return False, None, None, None, None, None
-        mx = lane_mean_x(visible)
+        mx = lane_assoc_x(visible)
         if mx is not None:
             if side == "left":
                 self._last_left_x = mx
