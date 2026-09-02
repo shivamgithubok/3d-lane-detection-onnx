@@ -93,7 +93,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-> **Jetson note:** `setup.sh` also copies system `tensorrt` and `cv2` into the venv. YOLO / depth engines may need extra packages such as `ultralytics` and a Jetson-compatible `torch` if you rebuild detectors from `.pt` weights.
+> **Jetson note:** `setup.sh` creates the venv with `--system-site-packages` and removes pip `tensorrt` wheels so the system `python3-libnvinfer` is used. YOLO / depth rebuilds may need `ultralytics` (already in `requirements.txt`) and a Jetson-compatible `torch` if you rebuild detectors from `.pt` weights.
 
 ### System packages (via `setup.sh`)
 
@@ -109,12 +109,15 @@ pip install -r requirements.txt
 
 ## What `setup.sh` Does
 
-1. Installs system APT packages (CUDA, TensorRT, OpenCV, Git LFS)
-2. Runs `git lfs install` + `git lfs pull` for model weights
-3. Creates `venv` and installs pip
-4. Installs **all packages from `requirements.txt`**
-5. Links system TensorRT / OpenCV into the venv
-6. Builds `models/anchor3dlane_raw.engine` with `trtexec` (FP16) if missing
+Detect-and-adapt setup (safe across Jetsons with different CUDA/TensorRT stacks):
+
+1. Detects GPU driver max CUDA, toolkit path, `trtexec`, and system Python TensorRT
+2. Installs base APT packages (OpenCV, Git LFS, build deps)
+3. Ensures a CUDA toolkit **≤ driver max CUDA** (does not force a newer toolkit)
+4. Reuses system TensorRT when present; otherwise installs `libnvinfer-bin` + `python3-libnvinfer` (avoids conflicting `nvidia-tensorrt-dev` when possible)
+5. Creates `venv` with `--system-site-packages` so system TensorRT/OpenCV are visible
+6. Installs `requirements.txt`, then removes any pip TensorRT wheels that would shadow system TRT
+7. Verifies imports, then builds missing engines: lane, MiDaS depth, YOLO
 
 ```bash
 chmod +x setup.sh
