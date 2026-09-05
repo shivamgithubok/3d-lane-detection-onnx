@@ -9,6 +9,24 @@ ANCHOR_Y_STEPS = np.array(
 )
 
 
+def active_y_steps(max_y_m=None):
+    """Y samples used for geometry / tracking / draw (≤ MAX_LANE_Y_M)."""
+    max_y = float(cfg.MAX_LANE_Y_M if max_y_m is None else max_y_m)
+    return ANCHOR_Y_STEPS[ANCHOR_Y_STEPS <= max_y + 1e-6]
+
+
+def clip_proposal_max_y(proposal, max_y_m=None):
+    """Zero visibility beyond max_y so far anchors are ignored (model still predicts them)."""
+    max_y = float(cfg.MAX_LANE_Y_M if max_y_m is None else max_y_m)
+    if isinstance(proposal, np.ndarray) and proposal.ndim == 2 and proposal.shape[1] == 3:
+        return proposal[proposal[:, 1] <= max_y + 1e-6]
+    out = np.asarray(proposal, dtype=np.float64).copy()
+    vis = out[5 + 2 * ANCHOR_LEN : 5 + 3 * ANCHOR_LEN]
+    vis[ANCHOR_Y_STEPS > max_y + 1e-6] = 0.0
+    out[5 + 2 * ANCHOR_LEN : 5 + 3 * ANCHOR_LEN] = vis
+    return out
+
+
 def softmax(x, axis=1):
     x_max = np.max(x, axis=axis, keepdims=True)
     e_x = np.exp(x - x_max)
@@ -19,15 +37,20 @@ def _lane_geometry_ok(
     proposal,
     min_visible_points=None,
     max_abs_mean_x=None,
+    min_abs_mean_x=None,
     max_lateral_jump=None,
     max_abs_slope=None,
 ):
-    """Reject short, far, zig-zag, or steeply diagonal lane proposals."""
+    """Reject short, far, near-center ghosts, zig-zag, or steep proposals."""
     min_visible_points = cfg.MIN_VISIBLE_POINTS if min_visible_points is None else min_visible_points
     max_abs_mean_x = cfg.MAX_ABS_MEAN_X_M if max_abs_mean_x is None else max_abs_mean_x
+    min_abs_mean_x = (
+        getattr(cfg, "MIN_ABS_MEAN_X_M", 0.0) if min_abs_mean_x is None else min_abs_mean_x
+    )
     max_lateral_jump = cfg.MAX_LATERAL_JUMP_M if max_lateral_jump is None else max_lateral_jump
     max_abs_slope = cfg.MAX_ABS_SLOPE if max_abs_slope is None else max_abs_slope
 
+    proposal = clip_proposal_max_y(proposal)
     xs = proposal[5 : 5 + ANCHOR_LEN].astype(np.float64)
     vis = proposal[5 + 2 * ANCHOR_LEN : 5 + 3 * ANCHOR_LEN] > 0
     if int(vis.sum()) < min_visible_points:
@@ -35,7 +58,17 @@ def _lane_geometry_ok(
 
     xs_v = xs[vis]
     ys_v = ANCHOR_Y_STEPS[vis]
-    if abs(float(np.mean(xs_v))) > max_abs_mean_x:
+    # Match lane_mean_x(near_only=True): far-curve bias must not hide a near
+    # shoulder/ghost that sits outside the lateral gate.
+    near = vis & (ANCHOR_Y_STEPS <= 40.0)
+    if int(near.sum()) >= 2:
+        mean_x = abs(float(np.mean(xs[near])))
+    else:
+        mean_x = abs(float(np.mean(xs_v)))
+    if mean_x > max_abs_mean_x:
+        return False
+    # Ghost centerlines often sit near X≈0 inside the ego lane (not real paint).
+    if mean_x < float(min_abs_mean_x):
         return False
 
     if len(xs_v) >= 2:
@@ -76,6 +109,9 @@ def postprocess_onnx_output(
     proposals, kept_scores = proposals[keep], score[keep]
     if proposals.shape[0] == 0:
         return proposals, None
+
+    # Drop far anchors before geometry / NMS / ranking.
+    proposals = np.stack([clip_proposal_max_y(p) for p in proposals], axis=0)
 
     if apply_geometry_filter:
         geo_keep = np.array([_lane_geometry_ok(p) for p in proposals], dtype=bool)
@@ -138,12 +174,22 @@ def _projective_transformation(P, x, y, z):
     return u, v
 
 
-def decode_lane_pixels(proposal, P_matrix):
+def decode_lane_pixels(proposal, P_matrix, flat_ground=False):
+    """
+    Project a 3D lane proposal into model-space pixels (480x360).
+
+    flat_ground=True forces Z=0 (same ground-plane style as BEV), which
+    removes wavy/floating height noise in the front-camera overlay.
+    """
+    max_y = float(getattr(cfg, "MAX_LANE_Y_M", 100.0))
     if isinstance(proposal, np.ndarray) and proposal.ndim == 2 and proposal.shape[1] == 3:
         xs = proposal[:, 0].astype(np.float64)
         ys = proposal[:, 1].astype(np.float64)
         zs = proposal[:, 2].astype(np.float64)
+        keep = ys <= max_y + 1e-6
+        xs, ys, zs = xs[keep], ys[keep], zs[keep]
     else:
+        proposal = clip_proposal_max_y(proposal, max_y)
         lane_xs = proposal[5 : 5 + ANCHOR_LEN]
         lane_zs = proposal[5 + ANCHOR_LEN : 5 + 2 * ANCHOR_LEN]
         lane_vis = proposal[5 + 2 * ANCHOR_LEN : 5 + 3 * ANCHOR_LEN] > 0
@@ -155,6 +201,9 @@ def decode_lane_pixels(proposal, P_matrix):
 
     if len(xs) < 2:
         return []
+
+    if flat_ground:
+        zs = np.zeros_like(xs)
 
     u, v = _projective_transformation(P_matrix, xs, ys, zs)
     return list(zip(u, v))

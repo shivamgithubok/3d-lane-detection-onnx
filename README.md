@@ -11,7 +11,11 @@
 
 # Anchor3DLane Jetson Inference & TensorRT + CIPO BEV ADAS
 
-Real-time **3D lane detection** and **CIPO (Closest In-Path Object)** visualization for **NVIDIA Jetson Orin**, with TensorRT engines, YOLO ByteTrack vehicle tracking, monocular depth, and a PySide6 front-camera + rotatable BEV dashboard.
+Real-time **3D lane detection** and **CIPO (Closest In-Path Object)** visualization for **NVIDIA Jetson Orin**, with TensorRT engines, YOLO ByteTrack vehicle tracking, monocular depth, and a PySide6 front-camera + Qt Quick 3D BEV dashboard.
+
+The BEV is **lane-anchored**: the ego corridor stays pinned on the canvas, the car and traffic move inside it, and dashed markings scroll from HUD speed (`∫v·dt`). Pose (`c0`, `c1`) is filtered faster than curvature (`c2`, `c3`) so the near field stays responsive without far-field flicker.
+
+**Deployment camera** is the Garmin dashcam clips in `testing_new_videos/` (`GRMN6694`, `GRMN6695`, `GRMN6700`). Frames are stretch-resized to **480×360** after a **20% sky crop** (`src/utils/camera_transform.py`) so OpenLane-trained framing is restored. The P-matrix stays on OpenLane extrinsics (−3° / 1.5 m); crop is source↔model geometry only.
 
 ---
 
@@ -25,8 +29,8 @@ chmod +x setup.sh
 # 2) Activate venv
 source venv/bin/activate
 
-# 3) Run the PySide6 ADAS / BEV app (main UI)
-python scripts/run_pyside6_app.py --video data/images/example_3.mp4
+# 3) Run the PySide6 ADAS / BEV app (default video is GRMN6694)
+python scripts/run_pyside6_app.py
 ```
 
 Other useful launchers:
@@ -35,24 +39,30 @@ Other useful launchers:
 # Headless GUI smoke test
 python scripts/run_pyside6_app.py --test-mode
 
-# Custom video + lane engine
+# Garmin target clips (car / real-time path)
+python scripts/run_pyside6_app.py --video testing_new_videos/GRMN6694_540_nohud.mp4
+python scripts/run_pyside6_app.py --video testing_new_videos/GRMN6695_540_nohud.mp4
+python scripts/run_pyside6_app.py --video testing_new_videos/GRMN6700_540_nohud.mp4
+
+# Custom engine, or legacy QPainter BEV
 python scripts/run_pyside6_app.py \
-  --video data/images/example_3.mp4 \
-  --model models/anchor3dlane_raw.engine
+  --video testing_new_videos/GRMN6694_540_nohud.mp4 \
+  --model models/anchor3dlane_raw.engine \
+  --bev quick3d
 
 # Offline CIPO video pipeline (writes annotated MP4)
 python scripts/infer_cipo_pipeline.py \
-  --video data/images/example_3.mp4 \
-  --output output/example_3_cipo.mp4
+  --video testing_new_videos/GRMN6694_540_nohud.mp4 \
+  --output output/grmn6694_cipo.mp4
 
 # Headless CIPO pipeline
 python scripts/infer_cipo_pipeline.py \
-  --video data/images/example_3.mp4 \
-  --output output/example_3_cipo.mp4 \
+  --video testing_new_videos/GRMN6694_540_nohud.mp4 \
+  --output output/grmn6694_cipo.mp4 \
   --no-gui
 
-# Lane-only TensorRT video
-python scripts/infer_video_tensorrt.py data/images/example_2.mp4
+# Lane-only TensorRT video (full-frame resize, no sky crop — not the GUI path)
+python scripts/infer_video_tensorrt.py data/images/example_3.mp4
 
 # Single-image TensorRT test
 python scripts/infer_tensorrt.py
@@ -83,7 +93,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-> **Jetson note:** `setup.sh` also copies system `tensorrt` and `cv2` into the venv. YOLO / depth engines may need extra packages such as `ultralytics` and a Jetson-compatible `torch` if you rebuild detectors from `.pt` weights.
+> **Jetson note:** `setup.sh` creates the venv with `--system-site-packages` and removes pip `tensorrt` wheels so the system `python3-libnvinfer` is used. YOLO / depth rebuilds may need `ultralytics` (already in `requirements.txt`) and a Jetson-compatible `torch` if you rebuild detectors from `.pt` weights.
 
 ### System packages (via `setup.sh`)
 
@@ -99,12 +109,15 @@ pip install -r requirements.txt
 
 ## What `setup.sh` Does
 
-1. Installs system APT packages (CUDA, TensorRT, OpenCV, Git LFS)
-2. Runs `git lfs install` + `git lfs pull` for model weights
-3. Creates `venv` and installs pip
-4. Installs **all packages from `requirements.txt`**
-5. Links system TensorRT / OpenCV into the venv
-6. Builds `models/anchor3dlane_raw.engine` with `trtexec` (FP16) if missing
+Detect-and-adapt setup (safe across Jetsons with different CUDA/TensorRT stacks):
+
+1. Detects GPU driver max CUDA, toolkit path, `trtexec`, and system Python TensorRT
+2. Installs base APT packages (OpenCV, Git LFS, build deps)
+3. Ensures a CUDA toolkit **≤ driver max CUDA** (does not force a newer toolkit)
+4. Reuses system TensorRT when present; otherwise installs `libnvinfer-bin` + `python3-libnvinfer` (avoids conflicting `nvidia-tensorrt-dev` when possible)
+5. Creates `venv` with `--system-site-packages` so system TensorRT/OpenCV are visible
+6. Installs `requirements.txt`, then removes any pip TensorRT wheels that would shadow system TRT
+7. Verifies imports, then builds missing engines: lane, MiDaS depth, YOLO
 
 ```bash
 chmod +x setup.sh
@@ -134,8 +147,37 @@ trtexec --loadEngine=models/anchor3dlane_raw.engine \
 Expected models for the full PySide6 pipeline:
 
 - `models/anchor3dlane_raw.engine` — 3D lanes
-- `models/yolov8n.engine` — vehicles (ByteTrack)
+- `models/yolov8n.engine` — YOLOv8-nano vehicles (ByteTrack, imgsz=640)
+
+Compile YOLO for this Orin (backs up the previous engine):
+
+```bash
+source venv/bin/activate
+python scripts/export_yolo_orin.py --imgsz 640
+```
 - `models/monocular_depth.engine` — depth (optional path)
+
+---
+
+## BEV and camera notes
+
+| Piece | What it does |
+| :--- | :--- |
+| `src/tracking/lane_frame.py` | Pins the lane, measures ego offset/yaw from the corridor cubic, scrolls dashes from speed |
+| `src/ui/bev_quick3d.py` + `src/ui/qml/BevScene.qml` | Qt Quick 3D BEV; ego `egoX` / `egoYawDeg`; no static ±5.35 m fallback edges |
+| `src/utils/camera_transform.py` | Default `SKY_CROP_FRAC = 0.20` then resize to 480×360 |
+| `src/utils/ego_speed.py` | HUD OCR speed for dash scroll and EKF coast |
+
+Do **not** nudge the sky crop down toward 10% without re-running the sweep: that band collapses recall on the Garmin clips. Past ~25% the model's 3D lane width starts to collapse.
+
+Verify a clip through the real QML widget (needs a detection cache first):
+
+```bash
+python scripts/debug/bev_poc_tune.py --cache          # once
+python scripts/debug/bev_qt3d_verify.py --metrics --video GRMN6695_540_nohud.mp4
+python scripts/debug/crop_sweep.py                    # sky-crop vs corridor quality
+python scripts/debug/width_bias_probe.py              # raw ego-pair width vs 12 ft truth
+```
 
 ---
 
@@ -143,18 +185,20 @@ Expected models for the full PySide6 pipeline:
 
 ```text
 3d-lane-detection-onnx/
-├── data/                 # Videos, car sprites, caches
+├── data/                 # Example videos, 3D assets
+├── testing_new_videos/   # Garmin dashcam targets (GRMN6694 / 6695 / 6700)
 ├── models/               # ONNX / TensorRT engines
 ├── scripts/
 │   ├── run_pyside6_app.py          # Main GUI launcher
-│   ├── infer_cipo_pipeline.py
+│   ├── infer_cipo_pipeline.py      # Uses CameraTransform (sky crop)
+│   ├── export_yolo_orin.py
 │   ├── infer_video_tensorrt.py
-│   └── infer_tensorrt.py
+│   └── debug/                      # BEV tune / QML verify / crop & width probes
 ├── src/
-│   ├── ui/               # PySide6 main window + BEV widget
+│   ├── ui/               # PySide6 + Qt Quick 3D BEV
 │   ├── inference/        # TRT / CIPO / YOLO / depth
-│   ├── tracking/
-│   └── utils/
+│   ├── tracking/         # RoadStateEstimator + LaneFrameModel
+│   └── utils/            # CameraTransform, ego speed, calibration
 ├── requirements.txt
 ├── setup.sh
 └── README.md

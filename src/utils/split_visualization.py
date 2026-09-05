@@ -6,7 +6,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from src.utils.visualization import draw_bev
 from src.inference.postprocess import ANCHOR_Y_STEPS, decode_lane_pixels
-from src.utils.drivable_area import extract_ego_corridor_3d, get_ego_corridor_2d_pixels, fill_missing_lane_gaps, find_ego_lanes
+from src.utils.drivable_area import extract_ego_corridor_3d, get_ego_corridor_2d_pixels, get_ego_corridor_sides_2d, fill_missing_lane_gaps, find_ego_lanes, parse_lane_components, parse_lane_components
 from src.utils.draw_3d_box import draw_3d_wireframe_box
 
 
@@ -130,18 +130,6 @@ def draw_futuristic_corner_bbox(img, pt1, pt2, color, thickness=1, corner_len=14
 
 ANCHOR_LEN = 20
 
-# Lane visual style per category
-_LANE_STYLE = {
-    # (color_BGR,  thickness, dash_gap)
-    "ego_left":     ((255, 255, 255), 2, 0),     # solid white  — left ego boundary
-    "ego_right":    ((255, 255, 255), 2, 0),     # solid white  — right ego boundary
-    "adjacent":     ((0,  200, 255), 2, 0),      # amber/gold   — nearest outer lanes
-    "far":          ((120, 160, 200), 1, 0),     # steel blue   — lanes beyond adjacent
-}
-
-
-from src.utils.drivable_area import extract_ego_corridor_3d, get_ego_corridor_2d_pixels, fill_missing_lane_gaps, find_ego_lanes, parse_lane_components
-
 
 def _get_lane_mean_x(lane, anchor_len=ANCHOR_LEN):
     if lane is None:
@@ -150,23 +138,61 @@ def _get_lane_mean_x(lane, anchor_len=ANCHOR_LEN):
     return float(np.mean(xs[vis])) if vis.sum() >= 2 else 0.0
 
 
+def _lerp_bgr(a, b, t):
+    t = max(0.0, min(1.0, float(t)))
+    return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
+
+
+def _fill_corridor_gradient(overlay, left_pts, right_pts, danger=False, warning=False):
+    """Banded fill: cyan→violet (safe), amber→orange (warn), magenta→red (danger)."""
+    n = min(len(left_pts), len(right_pts))
+    if n < 2:
+        return
+    if danger:
+        far_c, near_c = (90, 20, 140), (70, 40, 255)
+    elif warning:
+        far_c, near_c = (40, 90, 210), (0, 165, 255)
+    else:
+        far_c, near_c = (200, 70, 170), (255, 210, 60)
+    for i in range(n - 1):
+        t = i / max(1, n - 2)
+        color = _lerp_bgr(far_c, near_c, t)
+        quad = np.array(
+            [left_pts[i], left_pts[i + 1], right_pts[i + 1], right_pts[i]],
+            dtype=np.int32,
+        )
+        cv2.fillConvexPoly(overlay, quad, color)
+
+
 def _draw_lane_line(img, pts, color, thickness):
-    """Draw a smooth anti-aliased polyline through projected 2D points."""
-    for i in range(1, len(pts)):
-        cv2.line(img, pts[i - 1], pts[i], color, thickness, cv2.LINE_AA)
-    # Crisp node dots every other point
-    for p in pts[::3]:
-        cv2.circle(img, p, max(1, thickness - 1), (255, 255, 255), -1, cv2.LINE_AA)
+    """BEV-style flat painted lane: continuous anti-aliased polyline, no node dots."""
+    if len(pts) < 2:
+        return
+    arr = np.asarray(pts, dtype=np.int32).reshape(-1, 1, 2)
+    cv2.polylines(img, [arr], False, color, thickness, cv2.LINE_AA)
 
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-def draw_front_view_cipo(frame, proposals, objects, cipo_obj, P_matrix, show_drivable=True):
+def draw_front_view_cipo(
+    frame,
+    proposals,
+    objects,
+    cipo_obj,
+    P_matrix,
+    show_drivable=True,
+    ego_left=None,
+    ego_right=None,
+    frame_transform=None,
+    road_state_valid=True,
+    left_corridor_3d=None,
+    right_corridor_3d=None,
+):
     """
     Renders front camera view with ultra-fast single-pass overlay blending:
-      - Translucent Green Drivable Corridor (left=0.7 m, right=1.2 m inset from ego lanes)
-      - Outer 3D lane lines (ego white lines hidden)
+      - Translucent cyan→violet drivable corridor (margin inset; clipped above hood)
+      - 3D lane polylines projected with full P_matrix (model Z kept — calibrated look)
       - Professional 2D detection boxes with ID/class/distance label chips
     """
     annotated = frame.copy()
@@ -179,22 +205,26 @@ def draw_front_view_cipo(frame, proposals, objects, cipo_obj, P_matrix, show_dri
     if proposals is not None:
         proposals = fill_missing_lane_gaps(proposals)
 
-    ego_left, ego_right = find_ego_lanes(proposals) if proposals is not None else (None, None)
+    if road_state_valid and ego_left is None and ego_right is None:
+        ego_left, ego_right = find_ego_lanes(proposals) if proposals is not None else (None, None)
 
     in_path_objs     = [obj for obj in objects if obj['in_path']]
     min_dist_in_path = min([obj['Z_3d'] for obj in in_path_objs]) if in_path_objs else 999.0
     danger           = min_dist_in_path < 15.0
+    warning          = 15.0 <= min_dist_in_path < 30.0
 
     # ── 1. Drivable area corridor fill (on overlay) ──────────────────────
-    if show_drivable and proposals is not None:
-        poly_2d = get_ego_corridor_2d_pixels(
+    if show_drivable and road_state_valid and proposals is not None:
+        sides = get_ego_corridor_sides_2d(
             proposals, P_matrix,
             img_size=(480, 360), target_size=(w_img, h_img),
-            left_margin=0.70, right_margin=1.20
+            ego_left=ego_left, ego_right=ego_right,
+            model_to_target=(frame_transform.model_to_source if frame_transform is not None else None),
+            left_corridor_3d=left_corridor_3d,
+            right_corridor_3d=right_corridor_3d,
         )
-        if poly_2d is not None and len(poly_2d) > 2:
-            corridor_color = (0, 30, 255) if danger else (0, 220, 100)
-            cv2.fillPoly(overlay, [poly_2d], corridor_color)
+        if sides is not None:
+            _fill_corridor_gradient(overlay, sides[0], sides[1], danger=danger, warning=warning)
 
     # ── 2. Detection box fills & chips (on overlay & annotated) ───────────
     for obj in objects:
@@ -217,7 +247,7 @@ def draw_front_view_cipo(frame, proposals, objects, cipo_obj, P_matrix, show_dri
     # ── 3. SINGLE PASS ALPHA BLEND FOR ALL OVERLAYS ───────────────────────
     cv2.addWeighted(overlay, 0.35, annotated, 0.65, 0, annotated)
 
-    # ── 4. Outer 3D lane polylines (drawn on top of blend) ────────────────
+    # ── 4. Calibrated 3D lane polylines (use model Z + P_matrix) ──────────
     if proposals is not None:
         sorted_lanes = sorted(proposals, key=lambda l: _get_lane_mean_x(l))
 
@@ -226,27 +256,37 @@ def draw_front_view_cipo(frame, proposals, objects, cipo_obj, P_matrix, show_dri
             if ego_left  is not None and np.array_equal(lane, ego_left):  ego_l_idx = idx
             if ego_right is not None and np.array_equal(lane, ego_right): ego_r_idx = idx
 
+        no_ego_lock = ego_l_idx is None and ego_r_idx is None
         for idx, lane in enumerate(sorted_lanes):
-            if ego_left is not None and np.array_equal(lane, ego_left):
+            is_ego = (
+                (ego_left is not None and np.array_equal(lane, ego_left))
+                or (ego_right is not None and np.array_equal(lane, ego_right))
+            )
+            is_adj = (
+                (ego_l_idx is not None and idx == ego_l_idx - 1)
+                or (ego_r_idx is not None and idx == ego_r_idx + 1)
+            )
+            # Corridor fill already shows the ego path — hide those polylines
+            # only while a corridor is actually on screen. If occupancy drops
+            # the fill, keep detected paint visible so lanes do not vanish.
+            if is_ego and road_state_valid:
                 continue
-            if ego_right is not None and np.array_equal(lane, ego_right):
+            if not is_ego and not is_adj and not no_ego_lock:
                 continue
+            lane_color, thickness = (60, 150, 210), 1
 
-            if ego_l_idx is not None and idx == ego_l_idx - 1:
-                style = _LANE_STYLE["adjacent"]
-            elif ego_r_idx is not None and idx == ego_r_idx + 1:
-                style = _LANE_STYLE["adjacent"]
+            # flat_ground=False → keep calibrated height (do not zero Z)
+            pts = decode_lane_pixels(lane, P_matrix, flat_ground=False)
+            model_pts = np.asarray([(u, v) for u, v in pts if 0 <= u < 480 and 0 <= v < 360])
+            if frame_transform is not None and len(model_pts) > 0:
+                target_pts = frame_transform.model_to_source(model_pts)
+                draw_pts = [
+                    (int(round(u)), int(round(v)))
+                    for u, v in target_pts
+                    if 0 <= u < w_img and 0 <= v < h_img
+                ]
             else:
-                style = _LANE_STYLE["far"]
-
-            lane_color, thickness, _ = style
-
-            pts = decode_lane_pixels(lane, P_matrix)
-            draw_pts = [
-                (int(u * scale_x), int(v * scale_y))
-                for u, v in pts
-                if 0 <= u < 480 and 0 <= v < 360
-            ]
+                draw_pts = [(int(u * scale_x), int(v * scale_y)) for u, v in model_pts]
             if len(draw_pts) > 1:
                 _draw_lane_line(annotated, draw_pts, lane_color, thickness)
 
@@ -254,7 +294,14 @@ def draw_front_view_cipo(frame, proposals, objects, cipo_obj, P_matrix, show_dri
 
 
 
-def draw_bev_cipo(proposals, objects, max_z=60.0, cipo_status="SAFE"):
+def draw_bev_cipo(
+    proposals,
+    objects,
+    max_z=60.0,
+    cipo_status="SAFE",
+    left_corridor_3d=None,
+    right_corridor_3d=None,
+):
     """
     Renders top-down Bird's Eye View (BEV) map showing 3D lane lines, drivable area, and object positions.
     """
@@ -265,7 +312,14 @@ def draw_bev_cipo(proposals, objects, max_z=60.0, cipo_status="SAFE"):
     min_dist_in_path = min([obj['Z_3d'] for obj in in_path_objs]) if in_path_objs else 999.0
     status_bev = "DANGER" if min_dist_in_path < 15.0 else "SAFE"
 
-    bev = draw_bev(proposals, ANCHOR_Y_STEPS, cipo_status=status_bev)
+    bev = draw_bev(
+        proposals,
+        ANCHOR_Y_STEPS,
+        cipo_status=status_bev,
+        left_corridor_3d=left_corridor_3d,
+        right_corridor_3d=right_corridor_3d,
+        allow_auto_corridor=False,
+    )
     h_bev, w_bev = bev.shape[:2]
 
     def world_to_bev_px(x, y):
