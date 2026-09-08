@@ -12,10 +12,7 @@ class TRTYOLOVehicleDetector:
         self.engine_path = engine_path
         self.conf_thresh = conf_thresh
         self.iou_thresh = iou_thresh
-        self.input_shape = (1, 3, 384, 480)
-        self.output_shape = (1, 84, 3780)
 
-        # Load TensorRT Engine
         TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
         with open(engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
             self.engine = runtime.deserialize_cuda_engine(f.read())
@@ -23,19 +20,25 @@ class TRTYOLOVehicleDetector:
         self.context = self.engine.create_execution_context()
         self.stream = cuda.Stream()
 
-        # Allocate CUDA memory
+        in_name = "images"
+        out_name = "output0"
+        in_shape = tuple(self.engine.get_tensor_shape(in_name))
+        out_shape = tuple(self.engine.get_tensor_shape(out_name))
+        self.input_shape = tuple(int(x) if x > 0 else 1 for x in in_shape)
+        self.output_shape = tuple(int(x) if x > 0 else 1 for x in out_shape)
+        self.in_h, self.in_w = int(self.input_shape[2]), int(self.input_shape[3])
+
         self.h_input = np.empty(self.input_shape, dtype=np.float32)
         self.h_output = np.empty(self.output_shape, dtype=np.float32)
         self.d_input = cuda.mem_alloc(self.h_input.nbytes)
         self.d_output = cuda.mem_alloc(self.h_output.nbytes)
 
-        # Set TensorRT execution tensor addresses
         self.context.set_tensor_address("images", int(self.d_input))
         self.context.set_tensor_address("output0", int(self.d_output))
 
     def preprocess(self, frame):
         h, w = frame.shape[:2]
-        resized = cv2.resize(frame, (480, 384))
+        resized = cv2.resize(frame, (self.in_w, self.in_h))
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
         norm = (rgb.astype(np.float32) / 255.0).transpose(2, 0, 1)[None, ...]
         return np.ascontiguousarray(norm), w, h
@@ -61,8 +64,8 @@ class TRTYOLOVehicleDetector:
         valid_confs = confidences[mask]
         valid_class_ids = [vehicle_indices[idx] for idx in class_ids[mask]]
 
-        scale_x = orig_w / 480.0
-        scale_y = orig_h / 384.0
+        scale_x = orig_w / float(self.in_w)
+        scale_y = orig_h / float(self.in_h)
 
         boxes_xywh = []
         for box in valid_boxes:

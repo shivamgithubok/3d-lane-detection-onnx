@@ -165,18 +165,22 @@ class BEVWidget(QWidget):
             bool(self.cinematic_road),
         )
 
-    def _advance_dash_phase(self, has_detection: bool):
-        """Scroll dashes with wall-clock dt on each detection frame (no extra paint timer)."""
+    def _advance_dash_phase(self, has_detection: bool, speed_mps=None, dt=None):
+        """Scroll dashes by real ego odometry when available, else wall-clock dt."""
         if not self.cinematic_road or not has_detection:
             return
-        now = self._dash_clock.elapsed()
-        if self._dash_last_ms <= 0:
+        if speed_mps is not None and dt is not None and float(speed_mps) > 0.5:
+            step = float(speed_mps) * min(0.12, max(0.0, float(dt)))
+        else:
+            now = self._dash_clock.elapsed()
+            if self._dash_last_ms <= 0:
+                self._dash_last_ms = now
+                return
+            wall_dt = min(0.12, max(0.0, (now - self._dash_last_ms) / 1000.0))
             self._dash_last_ms = now
-            return
-        dt = min(0.12, max(0.0, (now - self._dash_last_ms) / 1000.0))
-        self._dash_last_ms = now
+            step = self._dash_speed_mps * wall_dt
         period = self._dash_len + self._dash_gap
-        self._dash_phase = (self._dash_phase + self._dash_speed_mps * dt) % period
+        self._dash_phase = (self._dash_phase + step) % period
 
     def _bev_visible(self, obj) -> bool:
         """Distance + lane filters: ego/2nd lane only, within BEV_MAX_DIST_M."""
@@ -363,7 +367,8 @@ class BEVWidget(QWidget):
         self._invalidate_road_cache()
         self.update()
 
-    def update_bev_data(self, proposals, processed_objs=None, cipo_status="SAFE", left_3d=None, right_3d=None):
+    def update_bev_data(self, proposals, processed_objs=None, cipo_status="SAFE", left_3d=None,
+                        right_3d=None, speed_mps=None, dt=1.0 / 30.0):
         """Receives new frame BEV data and triggers UI render update."""
         self.proposals = proposals if proposals is not None else []
         # Trust depth-model X/Z as-is (no artificial lateral nudging)
@@ -373,7 +378,7 @@ class BEVWidget(QWidget):
         self.right_3d = right_3d
 
         has_detection = bool(self.proposals) or bool(self.processed_objs)
-        self._advance_dash_phase(has_detection)
+        self._advance_dash_phase(has_detection, speed_mps=speed_mps, dt=dt)
         self.update()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -733,13 +738,13 @@ class BEVWidget(QWidget):
                         corridor_poly = QPolygonF(pts_left + pts_right[::-1])
                         if self.cinematic_road:
                             corridor_color = (
-                                QColor(220, 40, 50, 55) if self.cipo_status == "DANGER"
-                                else QColor(40, 200, 120, 45)
+                                QColor(220, 40, 70, 55) if self.cipo_status == "DANGER"
+                                else QColor(40, 180, 255, 50)
                             )
                         else:
                             corridor_color = (
-                                QColor(220, 30, 30, 85) if self.cipo_status == "DANGER"
-                                else QColor(0, 220, 100, 75)
+                                QColor(230, 40, 70, 85) if self.cipo_status == "DANGER"
+                                else QColor(40, 190, 255, 80)
                             )
                         painter.setBrush(QBrush(corridor_color))
                         painter.setPen(QPen(corridor_color.lighter(130), 1.0, Qt.SolidLine))

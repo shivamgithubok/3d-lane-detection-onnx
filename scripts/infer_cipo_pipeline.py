@@ -10,28 +10,26 @@ import pycuda.autoinit
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.inference.postprocess import postprocess_onnx_output, decode_lane_pixels
+from src.inference.lane_preprocess import prepare_lane_input
 from src.inference.cipo_tracker import CIPOTracker, DEFAULT_P_MATRIX
-from src.inference.trt_yolo_detector import TRTYOLOVehicleDetector
+from src.inference.object_detector import OfflineYOLOVehicleDetector
 from src.inference.trt_depth_estimator import TRTMonocularDepthEstimator
 from src.utils.split_visualization import draw_bev_cipo, draw_front_view_cipo, create_split_window
+from src.utils.camera_transform import CameraTransform
+from src.tracking.road_state import RoadStateEstimator
+from src.utils.ego_speed import EgoSpeedLog
 
 ENGINE_PATH = "models/anchor3dlane_raw.engine"
 DEFAULT_VIDEO_PATH = "data/images/example_3.mp4"
 OUTPUT_VIDEO_PATH = "output/example_3_futuristic_adas.mp4"
 
-IMG_NORM_MEAN = np.array([123.675, 116.28, 103.53], dtype=np.float32)
-IMG_NORM_STD  = np.array([58.395, 57.12, 57.375], dtype=np.float32)
 INPUT_H, INPUT_W = 360, 480
 
 def preprocess(frame):
-    resized = cv2.resize(frame, (INPUT_W, INPUT_H))
-    img = resized[:, :, ::-1].astype(np.float32)
-    img = (img - IMG_NORM_MEAN) / IMG_NORM_STD
-    img = img.transpose(2, 0, 1)[None, ...].astype(np.float32)
-    img = np.ascontiguousarray(img)
-    mask = np.zeros((1, 1, INPUT_H, INPUT_W), dtype=np.float32)
-    mask = np.ascontiguousarray(mask)
-    return img, mask, resized
+    frame_transform = CameraTransform.for_frame(frame, (INPUT_W, INPUT_H))
+    resized = frame_transform.apply(frame)
+    img, mask, meta = prepare_lane_input(resized)
+    return img, mask, resized, frame_transform, meta
 
 def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PATH, show_gui=True, max_frames=None, show_drivable=True):
     if not os.path.exists(video_path):
@@ -73,15 +71,22 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
     context.set_tensor_address("anchors", int(d_anchors))
 
     # 2. Initialize Object Detector & CIPO Tracker
-    print("[Pipeline] Initializing Triple-TensorRT Objects, Lanes & Depth Engines...")
-    detector = TRTYOLOVehicleDetector("models/yolov8n.engine")
+    print("[Pipeline] Initializing YOLO-nano ByteTrack, lanes & depth engines...")
+    detector = OfflineYOLOVehicleDetector(
+        model_path="models/yolov8n.engine", conf_thresh=0.22, imgsz=640
+    )
     depth_estimator = TRTMonocularDepthEstimator("models/monocular_depth.engine")
     tracker = CIPOTracker(P_matrix=DEFAULT_P_MATRIX, danger_dist=15.0, warning_dist=30.0)
+    road_state_estimator = RoadStateEstimator()
+    speed_log = EgoSpeedLog.auto_load(video_path)
+    if speed_log is not None:
+        print(f"[Speed] Loaded HUD JSON ({len(speed_log.mps)} frames)")
 
     # 3. Open Video Source
     print(f"[Video] Opening video source: {video_path}")
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    source_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -112,7 +117,7 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
         t0 = time.time()
 
         # Step A: Preprocess Frame for 3D Lane Model
-        img_tensor, mask_tensor, resized_frame = preprocess(frame)
+        img_tensor, mask_tensor, resized_frame, frame_transform, prep_meta = preprocess(frame)
 
         # Step B: TensorRT GPU Inference for 3D Lanes
         cuda.memcpy_htod_async(d_img, img_tensor, stream)
@@ -123,20 +128,45 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
         stream.synchronize()
 
         # Step C: Decode 3D Lane Proposals
-        lane_proposals, lane_scores = postprocess_onnx_output(h_reg_proposals)
+        raw_lane_proposals, lane_scores = postprocess_onnx_output(
+            h_reg_proposals, conf_threshold=prep_meta["conf"]
+        )
+        speed_mps = speed_log.get_mps(frame_idx - 1) if speed_log is not None else None
+        road_state = road_state_estimator.update(
+            raw_lane_proposals, dt=1.0 / source_fps, speed_mps=speed_mps
+        )
+        visual_lanes = road_state.visual_lanes
 
-        # Step D: Run Object Detection & Monocular Depth Estimation
-        raw_detections = detector.detect(frame)
+        # Step D: YOLO (release pycuda ctx so Ultralytics TRT can run) + depth
+        yolo_ctx = None
+        try:
+            yolo_ctx = cuda.Context.get_current()
+            if yolo_ctx is not None:
+                yolo_ctx.pop()
+        except Exception:
+            yolo_ctx = None
+        try:
+            raw_detections = detector.detect(frame)
+        finally:
+            if yolo_ctx is not None:
+                try:
+                    yolo_ctx.push()
+                except Exception:
+                    pass
         depth_map, _, _ = depth_estimator.estimate_depth_map(frame)
 
         # Step E: Process CIPO Tracker & 3D ROI In-Path Check
         h_frame, w_frame = frame.shape[:2]
         processed_objs, cipo_obj = tracker.process_detections(
             raw_detections, 
-            lane_proposals, 
+            road_state.lanes,
             frame_size=(w_frame, h_frame),
             depth_map=depth_map,
-            depth_estimator=depth_estimator
+            depth_estimator=depth_estimator,
+            ego_left=road_state.ego_left,
+            ego_right=road_state.ego_right,
+            frame_transform=frame_transform,
+            road_state_confirmed=road_state.is_confirmed,
         )
 
         t1 = time.time()
@@ -144,11 +174,38 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
         fps = 1.0 / max(0.001, frame_time)
         fps_history.append(fps)
 
-        cipo_status = cipo_obj['status'] if cipo_obj is not None else "SAFE"
+        if cipo_obj is not None:
+            cipo_status = "DANGER" if cipo_obj["Z_3d"] < tracker.danger_dist else (
+                "WARNING" if cipo_obj["Z_3d"] < tracker.warning_dist else "SAFE"
+            )
+            cipo_obj["status"] = cipo_status
+        elif road_state.status != "CONFIRMED":
+            cipo_status = "DEGRADED"
+        else:
+            cipo_status = "SAFE"
 
         # Step F: Render 3-Panel Split Window (Front View + BEV + HUD)
-        front_view = draw_front_view_cipo(frame, lane_proposals, processed_objs, cipo_obj, DEFAULT_P_MATRIX, show_drivable=show_drivable)
-        bev_view = draw_bev_cipo(lane_proposals, processed_objs, cipo_status=cipo_status)
+        front_view = draw_front_view_cipo(
+            frame,
+            visual_lanes,
+            processed_objs,
+            cipo_obj,
+            DEFAULT_P_MATRIX,
+            show_drivable=show_drivable and road_state.has_valid_corridor,
+            ego_left=road_state.ego_left,
+            ego_right=road_state.ego_right,
+            frame_transform=frame_transform,
+            road_state_valid=road_state.has_valid_corridor,
+            left_corridor_3d=road_state.left_corridor_3d,
+            right_corridor_3d=road_state.right_corridor_3d,
+        )
+        bev_view = draw_bev_cipo(
+            visual_lanes,
+            processed_objs,
+            cipo_status=cipo_status,
+            left_corridor_3d=road_state.left_corridor_3d,
+            right_corridor_3d=road_state.right_corridor_3d,
+        )
 
         split_canvas = create_split_window(front_view, bev_view, cipo_obj, fps, canvas_size=(720, 1080))
 
@@ -166,7 +223,7 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
 
         if frame_idx % 20 == 0:
             avg_fps = np.mean(fps_history[-20:])
-            cipo_str = f"{cipo_obj['Z_3d']:.1f}m [{cipo_obj['status']}]" if cipo_obj else "Clear"
+            cipo_str = f"{cipo_obj['Z_3d']:.1f}m [{cipo_obj['status']}]" if cipo_obj else cipo_status
             print(f" Frame [{frame_idx}/{total_frames}] | Speed: {avg_fps:.1f} FPS ({frame_time*1000:.1f}ms) | CIPO: {cipo_str}")
 
     cap.release()

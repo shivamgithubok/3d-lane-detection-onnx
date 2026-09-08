@@ -37,3 +37,14 @@ data/truck/ready/*.png
 data/truck/ready/*.jpeg
 notebooks/train_anchor3dlane_openlane1000.ipynb
 scripts/build_openlane1000_notebook.py
+scripts/patch_mmcv_sanity_cell.py
+scripts/analyze_bev_frames.py
+models/*.engine
+models/*.onnx
+models/*.pt
+*__pycache__
+src/inference/__pycache__
+src/ui/__pycache__
+src/utils/__pycache__
+scripts/debug/final_lane_ab.py
+scripts/debug/lane_param_sweep.py

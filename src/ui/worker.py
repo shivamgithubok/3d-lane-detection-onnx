@@ -13,32 +13,34 @@ import os
 import time
 from PySide6.QtCore import QThread, Signal
 from src.inference.postprocess import postprocess_onnx_output
-from src.inference import lane_filter_config as lane_cfg
-from src.utils.drivable_area import extract_ego_corridor_3d
-from src.tracking.lane_association import LaneTrackerManager
-from src.inference.cipo_tracker import CIPOTracker, DEFAULT_P_MATRIX
-from src.inference.trt_yolo_detector import TRTYOLOVehicleDetector
+from src.inference.lane_preprocess import prepare_lane_input
+from src.inference.cipo_tracker import CIPOTracker
 from src.inference.trt_depth_estimator import TRTMonocularDepthEstimator
 from src.inference.object_detector import OfflineYOLOVehicleDetector
 from src.utils.split_visualization import draw_front_view_cipo
+from src.utils.camera_transform import CameraTransform
+from src.tracking.road_state import RoadStateEstimator
+from src.utils.ego_speed import EgoSpeedLog
+from src.utils.calibration import (
+    make_P_matrix,
+    preset_for_video,
+    OPENLANE_CAM_PITCH_DEG,
+    OPENLANE_CAM_HEIGHT,
+)
 
-IMG_NORM_MEAN = np.array([123.675, 116.28, 103.53], dtype=np.float32)
-IMG_NORM_STD  = np.array([58.395, 57.12, 57.375], dtype=np.float32)
 INPUT_H, INPUT_W = 360, 480
 
 def preprocess_frame(frame):
-    resized = cv2.resize(frame, (INPUT_W, INPUT_H))
-    img = resized[:, :, ::-1].astype(np.float32)
-    img = (img - IMG_NORM_MEAN) / IMG_NORM_STD
-    img = img.transpose(2, 0, 1)[None, ...].astype(np.float32)
-    img = np.ascontiguousarray(img)
-    mask = np.zeros((1, 1, INPUT_H, INPUT_W), dtype=np.float32)
-    mask = np.ascontiguousarray(mask)
-    return img, mask, resized
+    frame_transform = CameraTransform.for_frame(frame, (INPUT_W, INPUT_H))
+    resized = frame_transform.apply(frame)
+    img, mask, meta = prepare_lane_input(resized)
+    return img, mask, resized, frame_transform, meta
 
 class InferenceWorker(QThread):
-    # Signal emitted to UI: frame_rgb, proposals, processed_objs, cipo_obj, cipo_status, left_3d, right_3d, avg_fps, latency_ms
-    frame_processed = Signal(np.ndarray, list, list, object, str, object, object, float, float)
+    # Signal emitted to UI: frame_rgb, proposals, processed_objs, cipo_obj, cipo_status,
+    # left_3d, right_3d, avg_fps, latency_ms, speed_mps, source_dt
+    # speed_mps / source_dt drive the lane-anchored BEV: the road scrolls by v*dt.
+    frame_processed = Signal(np.ndarray, list, list, object, str, object, object, float, float, object, float)
     status_message = Signal(str)
 
     def __init__(self, video_path=None, model_path="models/anchor3dlane_raw.engine", parent=None):
@@ -49,8 +51,23 @@ class InferenceWorker(QThread):
         self.depth_engine_path = "models/monocular_depth.engine"
         self.running = False
         self.paused = False
-        # Initialize YOLO detector once with ByteTrack persistence using the TensorRT engine
-        self.detector = OfflineYOLOVehicleDetector(model_path="models/yolov8n.engine")
+        # YOLO is created on the worker thread after CUDA is ready (avoids empty/missed frames)
+        self.detector = None
+        # P is LOCKED to OpenLane training extrinsics. Retuning pitch (e.g. Garmin -6°)
+        # shears the front corridor vs cyan lanes — model 3D assumes this camera.
+        pitch, height = preset_for_video(video_path)
+        self.calib_pitch = float(pitch)
+        self.calib_height = float(height)
+        self.P_matrix = make_P_matrix(OPENLANE_CAM_PITCH_DEG, OPENLANE_CAM_HEIGHT)
+
+    def set_calibration(self, pitch_deg, height_m):
+        """
+        Cal panel no longer rebuilds P. Live pitch/height changes break
+        model-3D ↔ image projection consistency (narrow/skewed red corridor).
+        """
+        self.calib_pitch = OPENLANE_CAM_PITCH_DEG
+        self.calib_height = OPENLANE_CAM_HEIGHT
+        self.P_matrix = make_P_matrix(OPENLANE_CAM_PITCH_DEG, OPENLANE_CAM_HEIGHT)
 
     def run(self):
         self.running = True
@@ -62,13 +79,11 @@ class InferenceWorker(QThread):
 
         depth_estimator = None
         tracker = None
-        # Lane robustness knobs live in src/inference/lane_filter_config.py
-        tracker_manager = LaneTrackerManager(
-            max_missed_frames=lane_cfg.EKF_MAX_MISSED_FRAMES,
-            dist_threshold=lane_cfg.EKF_DIST_THRESHOLD_M,
-            confirm_hits=lane_cfg.EKF_CONFIRM_HITS,
-            require_confirmed=lane_cfg.EKF_REQUIRE_CONFIRMED,
-        )
+        detector = None
+        road_state_estimator = RoadStateEstimator()
+        speed_log = EgoSpeedLog.auto_load(self.video_path) if self.video_path else None
+        if speed_log is not None:
+            self.status_message.emit(f"Loaded ego speed JSON ({len(speed_log.mps)} frames)")
 
         # Initialize CUDA Context & Triple TensorRT Engines
         if os.path.exists(self.engine_path):
@@ -110,15 +125,39 @@ class InferenceWorker(QThread):
                 trt_context.set_tensor_address("reg_proposals", int(d_reg_proposals))
                 trt_context.set_tensor_address("anchors", int(d_anchors))
 
-                # 2. YOLO Vehicle Detector (ByteTrack) already initialized as self.detector
-                detector = self.detector
+                # 2. YOLO nano + ByteTrack (pop pycuda so Ultralytics/TensorRT can load)
+                detector = None
+                try:
+                    cuda_ctx.pop()
+                except Exception:
+                    pass
+                try:
+                    yolo_path = self.yolo_engine_path
+                    if not os.path.isfile(yolo_path):
+                        yolo_path = "models/yolov8n.pt"
+                    self.detector = OfflineYOLOVehicleDetector(
+                        model_path=yolo_path, conf_thresh=0.22, imgsz=640
+                    )
+                    detector = self.detector
+                except Exception as ye:
+                    self.status_message.emit(f"YOLO init warning: {ye}")
+                    self.detector = None
+                    detector = None
+                finally:
+                    try:
+                        cuda_ctx.push()
+                    except Exception:
+                        pass
 
                 # 3. Load Monocular Depth Estimator Engine
                 if os.path.exists(self.depth_engine_path):
                     depth_estimator = TRTMonocularDepthEstimator(self.depth_engine_path)
 
                 # 4. Initialize CIPO Tracker
-                tracker = CIPOTracker(P_matrix=DEFAULT_P_MATRIX, danger_dist=15.0, warning_dist=30.0)
+                tracker = CIPOTracker(P_matrix=self.P_matrix, danger_dist=15.0, warning_dist=30.0)
+                self.status_message.emit(
+                    f"Calib pitch={self.calib_pitch:.1f}° h={self.calib_height:.1f}m"
+                )
 
                 use_trt = True
                 self.status_message.emit("🚀 Triple-TensorRT Engines Ready (Lanes + YOLO + MiDaS Depth)")
@@ -133,6 +172,7 @@ class InferenceWorker(QThread):
         fps_history = []
         frame_i = 0
         last_depth_map = None
+        last_source_ms = None
         DEPTH_EVERY_N = 2  # reuse depth on alternate frames → big FPS win on Orin
 
         try:
@@ -144,20 +184,29 @@ class InferenceWorker(QThread):
                 t0 = time.perf_counter()
 
                 frame = None
+                frame_transform = None
+                source_dt = 1.0 / 30.0
                 if cap and cap.isOpened():
                     ret, frame = cap.read()
                     if not ret:
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        last_source_ms = None
                         continue
+                    source_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+                    if last_source_ms is not None and source_ms > last_source_ms:
+                        source_dt = (source_ms - last_source_ms) / 1000.0
+                    last_source_ms = source_ms
 
                 proposals = []
                 processed_objs = []
                 cipo_obj = None
                 cipo_status = "SAFE"
+                ego_left, ego_right = None, None
+                speed_mps = None
 
                 if frame is not None and use_trt:
                     # Step A: 3D Lane TensorRT Inference
-                    img_tensor, mask_tensor, _ = preprocess_frame(frame)
+                    img_tensor, mask_tensor, _, frame_transform, prep_meta = preprocess_frame(frame)
                     cuda.memcpy_htod_async(d_img, img_tensor, stream)
                     cuda.memcpy_htod_async(d_mask, mask_tensor, stream)
 
@@ -167,12 +216,33 @@ class InferenceWorker(QThread):
                     cuda.memcpy_dtoh_async(h_anchors, d_anchors, stream)
                     stream.synchronize()
 
-                    raw_proposals, scores = postprocess_onnx_output(h_reg_proposals)
-                    smoothed_proposals = tracker_manager.update(raw_proposals, dt=0.033)
-                    proposals = smoothed_proposals if len(smoothed_proposals) > 0 else raw_proposals
+                    raw_proposals, scores = postprocess_onnx_output(
+                        h_reg_proposals, conf_threshold=prep_meta["conf"]
+                    )
+                    speed_mps = speed_log.get_mps(frame_i) if speed_log is not None else None
+                    road_state = road_state_estimator.update(
+                        raw_proposals, dt=source_dt, speed_mps=speed_mps
+                    )
+                    # Render immediate measurements while tracks acquire; only
+                    # confirmed/predicted tracks may feed CIPO safety logic.
+                    proposals = road_state.visual_lanes
+                    safety_lanes = road_state.lanes
 
                     # Step B: YOLO Vehicle Detection & Depth Map Estimation
-                    raw_detections = detector.detect(frame) if detector else []
+                    # Pop pycuda context so Ultralytics/TensorRT YOLO can use the GPU (P0)
+                    if cuda_ctx is not None:
+                        try:
+                            cuda_ctx.pop()
+                        except Exception:
+                            pass
+                    try:
+                        raw_detections = detector.detect(frame) if detector else []
+                    finally:
+                        if cuda_ctx is not None:
+                            try:
+                                cuda_ctx.push()
+                            except Exception:
+                                pass
                     depth_map = last_depth_map
                     if depth_estimator and (frame_i % DEPTH_EVERY_N == 0 or last_depth_map is None):
                         depth_map, _, _ = depth_estimator.estimate_depth_map(frame)
@@ -180,30 +250,55 @@ class InferenceWorker(QThread):
 
                     # Step C: CIPO Tracker & 3D In-Path Association
                     h_frame, w_frame = frame.shape[:2]
+                    ego_left, ego_right = road_state.ego_left, road_state.ego_right
+                    # Live Cal panel → keep CIPO P in sync
+                    if tracker is not None:
+                        tracker.P = np.asarray(self.P_matrix, dtype=np.float64)
                     if tracker and (raw_detections or proposals is not None):
-                        processed_objs, _ = tracker.process_detections(
+                        processed_objs, cipo_obj = tracker.process_detections(
                             raw_detections,
-                            proposals,
+                            safety_lanes,
                             frame_size=(w_frame, h_frame),
                             depth_map=depth_map,
-                            depth_estimator=depth_estimator
+                            depth_estimator=depth_estimator,
+                            ego_left=ego_left,
+                            ego_right=ego_right,
+                            frame_transform=frame_transform,
+                            road_state_confirmed=road_state.is_confirmed,
                         )
 
                         # Find Closest In-Path Object (CIPO)
                         in_path_objs = [obj for obj in processed_objs if obj['in_path']]
-                        if in_path_objs:
+                        if in_path_objs and road_state.is_confirmed:
                             cipo_obj = min(in_path_objs, key=lambda o: o['Z_3d'])
                             dist_z = cipo_obj['Z_3d']
                             cipo_status = "DANGER" if dist_z < 15.0 else ("WARNING" if dist_z < 30.0 else "SAFE")
                             cipo_obj['status'] = cipo_status
+                        elif road_state.status != "CONFIRMED":
+                            cipo_status = "DEGRADED"
 
-                # Step D: Extract Ego Corridor 3D
-                left_3d, right_3d = extract_ego_corridor_3d(proposals, anchor_len=20) if proposals is not None else (None, None)
+                # Step D: All rendering reads the same validated temporal road state.
+                if frame is not None and use_trt:
+                    left_3d = road_state.left_corridor_3d
+                    right_3d = road_state.right_corridor_3d
+                else:
+                    left_3d, right_3d = None, None
 
                 # Step E: Render Front View Overlay (Lanes + Drivable Corridor + 3D Bboxes)
                 if frame is not None:
                     annotated_frame = draw_front_view_cipo(
-                        frame, proposals, processed_objs, cipo_obj, DEFAULT_P_MATRIX, show_drivable=True
+                        frame,
+                        proposals,
+                        processed_objs,
+                        cipo_obj,
+                        np.asarray(self.P_matrix, dtype=np.float64),
+                        show_drivable=True,
+                        ego_left=ego_left,
+                        ego_right=ego_right,
+                        frame_transform=frame_transform,
+                        road_state_valid=(left_3d is not None and right_3d is not None),
+                        left_corridor_3d=left_3d,
+                        right_corridor_3d=right_3d,
                     )
                     frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
                     # Downscale for UI transfer/paint (keeps HUD readable, cuts Qt cost)
@@ -226,7 +321,8 @@ class InferenceWorker(QThread):
 
                 # Emit signal to GUI
                 self.frame_processed.emit(
-                    frame_rgb, proposals, processed_objs, cipo_obj, cipo_status, left_3d, right_3d, avg_fps, latency_ms
+                    frame_rgb, proposals, processed_objs, cipo_obj, cipo_status, left_3d, right_3d,
+                    avg_fps, latency_ms, speed_mps, float(source_dt)
                 )
 
                 frame_i += 1
