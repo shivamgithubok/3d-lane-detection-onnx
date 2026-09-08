@@ -808,11 +808,13 @@ class BEVWidget(QWidget):
 
                     is_cipo = obj.get('is_cipo', False)
                     in_path = obj.get('in_path', False)
-                    dist_z = z_3d
+                    obj_status = str(obj.get('status', self.cipo_status))
 
-                    if is_cipo or dist_z < 15.0:
+                    if is_cipo and obj_status == "DANGER":
                         marker_color = QColor(255, 40, 40)
-                    elif in_path:
+                    elif is_cipo and obj_status == "WARNING":
+                        marker_color = QColor(255, 170, 40)
+                    elif is_cipo or in_path:
                         marker_color = QColor(255, 200, 0)
                     else:
                         marker_color = QColor(0, 220, 255)

@@ -53,9 +53,8 @@ class RoadStateEstimator:
     """Tracks lanes and exposes one validated ego-corridor snapshot per frame.
 
     A predicted corridor is useful to prevent a visual flash during a brief
-    miss, but it is deliberately not treated as confirmed for new CIPO
-    classification.  Once the bounded track/pair hold expires, the state is
-    UNKNOWN and no corridor is emitted.
+    miss. CIPO may still latch as probable on PREDICTED. Once the bounded
+    track/pair hold expires, the state is UNKNOWN and no corridor is emitted.
 
     One-sided reconstruct (P1): if a locked lane width exists and only one ego
     boundary is measured, the missing side is synthesized in the near field

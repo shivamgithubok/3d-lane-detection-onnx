@@ -37,6 +37,7 @@ from src.ui.car_assets import (
     asset_url,
 )
 from src.tracking.lane_frame import LaneFrameModel
+from src.tracking.lane_assignment import LaneAssigner, LaneModel, place_in_lane
 from src.utils.drivable_area import parse_lane_components
 
 # Local copies — do not import bev_widget (QPainter + sprite pipeline).
@@ -47,6 +48,12 @@ DEFAULT_VIEW_YAW = 0.0
 DEFAULT_ZOOM = 1.05
 DEFAULT_CALIB_PITCH = -7.0
 DEFAULT_CALIB_H = 1.0
+
+# Layer A: ego body keep-out (half sedan length ~2.3 m + bumper margin).
+EGO_KEEP_OUT_M = 5.0
+
+TRAFFIC_LANE_MAX = 2          # hide |lane| > 2 (3rd+ outer)
+DEFAULT_LANE_W_M = 3.7
 
 # Uniform sampling of every lane-frame polyline. Constant across frames.
 POLY_SAMPLES = 48
@@ -61,7 +68,6 @@ MAX_SLOT = 3  # boundaries per side beyond the ego pair
 
 _QML_PATH = os.path.join(os.path.dirname(__file__), "qml", "BevScene.qml")
 _YAW_AWAY = 180.0  # same heading as ego (rear toward chase cam)
-_SEDAN_CYCLE = (KIND_SKODA, KIND_SHC)
 _ENV_MODES = ("auto", "day", "dusk", "night", "demo")
 
 
@@ -119,6 +125,8 @@ class BevQuick3DWidget(QQuickWidget):
         self.env_mode = "auto"
         self.lane_frame = LaneFrameModel()
         self._slots = _SlotTracker()
+        self._tid_slot = {}   # track_id → (mesh_kind, mesh_pool_index)
+        self._lane_assign = LaneAssigner(max_index=TRAFFIC_LANE_MAX)
         self._last_traffic_json = None
         self._last_corridor_json = None
         self._last_lane_json = None
@@ -225,14 +233,46 @@ class BevQuick3DWidget(QQuickWidget):
         self._set("calibPitch", float(pitch_deg))
         self._set("calibH", float(height_m))
 
+    def toggle_debug_metric(self):
+        """Ego centreline at x=0, 10 m ruler ticks, per-object (x, z) in metres.
+
+        Reads the same trafficJson the renderer consumes, so the printed numbers
+        cannot drift from the drawn positions. Pair with
+        scripts/debug/range_diagnostics.py to check BEV placement against the
+        per-frame CSV.
+        """
+        root = self._root()
+        cur = bool(root.property("debugMetric")) if root is not None else False
+        self._set("debugMetric", not cur)
+        self._set("debugMaxZ", float(BEV_MAX_DIST_M))
+        return not cur
+
     def _bev_visible(self, obj) -> bool:
         z = float(obj.get("Z_3d", 0.0))
         x = float(obj.get("X_3d", 0.0))
-        if not (0.5 < z <= BEV_MAX_DIST_M):
+        # Layer A: never draw into the ego GLB body.
+        if not (EGO_KEEP_OUT_M < z <= BEV_MAX_DIST_M):
             return False
         if abs(x) > BEV_MAX_LATERAL_M:
             return False
+        # Outer / 3rd+ lanes stay off the overlay: too sparse to be useful.
+        if int(obj.get("lane_rank", 0)) > TRAFFIC_LANE_MAX:
+            return False
         return True
+
+    def _lane_width_m(self) -> float:
+        if self.lane_frame.valid:
+            return max(2.8, min(4.6, float(self.lane_frame.lane_width)))
+        return DEFAULT_LANE_W_M
+
+    def _measured_lane_slot(self, obj) -> int:
+        """Lane index at the object's own range. Never force in-path to slot 0."""
+        z = max(1.0, float(obj.get("Z_3d", 1.0)))
+        x_cam = float(obj.get("X_3d", 0.0))
+        x_lf = self._traffic_x(x_cam, z)
+        w = self._lane_width_m()
+        raw = int(round(x_lf / w))
+        return int(np.clip(raw, -TRAFFIC_LANE_MAX, TRAFFIC_LANE_MAX))
 
     def _heading_yaw(self, obj) -> float:
         # Highway same-direction traffic: every car faces like ego.
@@ -380,55 +420,93 @@ class BevQuick3DWidget(QQuickWidget):
                     break
         return rows[:36]
 
+    def _prefer_kind(self, obj):
+        label = str(obj.get("label", "car")).lower()
+        truck = any(k in label for k in TRUCK_LABELS)
+        if truck and TRAFFIC_DODGE.exists() and KIND_MAX.get(KIND_DODGE, 0) > 0:
+            return KIND_DODGE
+        return KIND_SKODA
+
+    def _alloc_slot(self, tid, prefer_kind):
+        """Keep (kind, slot) sticky per track_id so QML nodes do not swap cars."""
+        existing = self._tid_slot.get(tid)
+        if existing is not None:
+            kind, slot = existing
+            # Drop SHC/Tesla leftovers: those meshes were centimetre-scale specks.
+            if kind in (KIND_SHC, KIND_TESLA) or KIND_MAX.get(kind, 0) <= slot:
+                self._tid_slot.pop(tid, None)
+            else:
+                return existing
+        taken = {k: set() for k in KIND_MAX}
+        for k, s in self._tid_slot.values():
+            taken.setdefault(k, set()).add(s)
+        for kind in (prefer_kind, KIND_SKODA, KIND_DODGE):
+            cap = int(KIND_MAX.get(kind, 0))
+            if cap <= 0 or not KIND_ASSETS[kind].exists():
+                continue
+            used = taken.get(kind, set())
+            for slot in range(cap):
+                if slot not in used:
+                    self._tid_slot[tid] = (kind, slot)
+                    return kind, slot
+        return None
+
     def _traffic_payload(self, objs):
         rows = []
         if not objs:
+            self._tid_slot = {}
+            self._lane_assign.drop([])
             return rows
         visible = [o for o in objs if self._bev_visible(o)]
-        visible.sort(key=lambda o: float(o.get("Z_3d", 99.0)))
+        live = set()
+        for obj in visible:
+            tid = int(obj.get("track_id", -1))
+            if tid > 0:
+                live.add(tid)
+        self._tid_slot = {tid: slot for tid, slot in self._tid_slot.items() if tid in live}
+        self._lane_assign.drop(live)
+
         cipo = self._pick_cipo(visible)
         cipo_tid = int(cipo.get("track_id", -999)) if cipo is not None else None
-        if cipo is not None:
-            visible.sort(key=lambda o: (int(o.get("track_id", -1)) != cipo_tid, float(o.get("Z_3d", 99.0))))
-        used = {k: 0 for k in KIND_MAX}
-        for obj in visible:
-            label = str(obj.get("label", "car")).lower()
-            truck = any(k in label for k in TRUCK_LABELS)
-            if truck and TRAFFIC_DODGE.exists():
-                kind = KIND_DODGE
-            else:
-                tid = int(obj.get("track_id", 0))
-                kind = _SEDAN_CYCLE[tid % len(_SEDAN_CYCLE)]
-                if not KIND_ASSETS[kind].exists():
-                    kind = KIND_SKODA
-            if used[kind] >= KIND_MAX[kind]:
-                if used[KIND_SKODA] < KIND_MAX[KIND_SKODA] and TRAFFIC_SKODA.exists():
-                    kind = KIND_SKODA
-                else:
-                    continue
-            asset = KIND_ASSETS[kind]
-            if not asset.exists():
+        lane_model = LaneModel.from_lane_frame(self.lane_frame, n_left=2, n_right=2)
+        ordered = sorted(
+            visible,
+            key=lambda o: (
+                int(o.get("track_id", -1)) != cipo_tid,
+                int(o.get("track_id", -1)) not in self._tid_slot,
+                float(o.get("Z_3d", 99.0)),
+            ),
+        )
+        for obj in ordered:
+            tid = int(obj.get("track_id", -1))
+            if tid <= 0:
                 continue
             z = float(obj["Z_3d"])
-            # Traffic lives in the same lane frame as the road, otherwise cars
-            # would slide sideways whenever the ego drifted in its lane.
-            x = self._traffic_x(float(obj["X_3d"]), z)
-            too_close = False
-            for prev in rows:
-                dx = x - float(prev["posX"])
-                dz = z + float(prev["posZ"])  # posZ is -Z
-                if dx * dx + dz * dz < 6.25:  # 2.5 m
-                    too_close = True
-                    break
-            if too_close and int(obj.get("track_id", -1)) != cipo_tid:
+            if z <= EGO_KEEP_OUT_M:
                 continue
-            used[kind] += 1
+
+            x_cam = float(obj.get("X_3d", 0.0))
+            lane_slot, _off = self._lane_assign.update(tid, x_cam, z, lane_model)
+            if lane_slot is None:
+                lane_slot = self._measured_lane_slot(obj)
+            x, y = place_in_lane(x_cam, z, lane_model, lane_slot, snap_strength=0.0)
+            if abs(int(lane_slot or 0)) > TRAFFIC_LANE_MAX:
+                continue
+
+            bound = self._alloc_slot(tid, self._prefer_kind(obj))
+            if bound is None:
+                continue
+            kind, mesh_slot = bound
+            asset = KIND_ASSETS[kind]
             rows.append({
-                "posX": round(x, 2),
-                "posY": round(float(asset.y), 2),
-                "posZ": round(-z, 2),
-                "yawDeg": 180.0,
+                "tid": tid,
                 "kind": kind,
+                "slot": mesh_slot,
+                "lane": int(lane_slot),
+                "posX": round(float(x), 2),
+                "posY": round(float(asset.y), 2),
+                "posZ": round(-float(y), 2),
+                "yawDeg": 180.0,
             })
         return rows
 
@@ -457,10 +535,15 @@ class BevQuick3DWidget(QQuickWidget):
             self._set("cipoDist", 0.0)
             return
         z = float(cipo.get("Z_3d", 0.0))
-        self._set("cipoVisible", True)
-        self._set("cipoX", round(self._traffic_x(float(cipo.get("X_3d", 0.0)), z), 2))
-        self._set("cipoZ", round(-z, 2))
         self._set("cipoDist", round(z, 1))
+        # Keep HUD distance, but never park the CIPO beacon inside the ego body.
+        if z <= EGO_KEEP_OUT_M:
+            self._set("cipoVisible", False)
+            return
+        self._set("cipoVisible", True)
+        # CIPO marker sits on ego-lane centre (slot 0) in the lane frame.
+        self._set("cipoX", 0.0)
+        self._set("cipoZ", round(-z, 2))
 
     def _push_ego_pose(self):
         offset, yaw = self.lane_frame.ego_pose()

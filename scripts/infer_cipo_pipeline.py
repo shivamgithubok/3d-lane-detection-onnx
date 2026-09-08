@@ -13,11 +13,11 @@ from src.inference.postprocess import postprocess_onnx_output, decode_lane_pixel
 from src.inference.lane_preprocess import prepare_lane_input
 from src.inference.cipo_tracker import CIPOTracker, DEFAULT_P_MATRIX
 from src.inference.object_detector import OfflineYOLOVehicleDetector
-from src.inference.trt_depth_estimator import TRTMonocularDepthEstimator
 from src.utils.split_visualization import draw_bev_cipo, draw_front_view_cipo, create_split_window
 from src.utils.camera_transform import CameraTransform
 from src.tracking.road_state import RoadStateEstimator
 from src.utils.ego_speed import EgoSpeedLog
+from src.utils.ground_calib import GroundCalibration
 
 ENGINE_PATH = "models/anchor3dlane_raw.engine"
 DEFAULT_VIDEO_PATH = "data/images/example_3.mp4"
@@ -71,12 +71,17 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
     context.set_tensor_address("anchors", int(d_anchors))
 
     # 2. Initialize Object Detector & CIPO Tracker
-    print("[Pipeline] Initializing YOLO-nano ByteTrack, lanes & depth engines...")
+    print("[Pipeline] Initializing YOLO-nano ByteTrack & CIPO (ground-plane range)...")
     detector = OfflineYOLOVehicleDetector(
         model_path="models/yolov8n.engine", conf_thresh=0.22, imgsz=640
     )
-    depth_estimator = TRTMonocularDepthEstimator("models/monocular_depth.engine")
-    tracker = CIPOTracker(P_matrix=DEFAULT_P_MATRIX, danger_dist=15.0, warning_dist=30.0)
+    tracker = CIPOTracker(
+        P_matrix=DEFAULT_P_MATRIX,
+        danger_dist=15.0,
+        warning_dist=30.0,
+        ground_calib=GroundCalibration.for_video(video_path),
+    )
+    tracker._video_path = video_path
     road_state_estimator = RoadStateEstimator()
     speed_log = EgoSpeedLog.auto_load(video_path)
     if speed_log is not None:
@@ -137,7 +142,7 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
         )
         visual_lanes = road_state.visual_lanes
 
-        # Step D: YOLO (release pycuda ctx so Ultralytics TRT can run) + depth
+        # Step D: YOLO (release pycuda ctx so Ultralytics TRT can run)
         yolo_ctx = None
         try:
             yolo_ctx = cuda.Context.get_current()
@@ -153,20 +158,22 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
                     yolo_ctx.push()
                 except Exception:
                     pass
-        depth_map, _, _ = depth_estimator.estimate_depth_map(frame)
 
         # Step E: Process CIPO Tracker & 3D ROI In-Path Check
         h_frame, w_frame = frame.shape[:2]
         processed_objs, cipo_obj = tracker.process_detections(
-            raw_detections, 
+            raw_detections,
             road_state.lanes,
             frame_size=(w_frame, h_frame),
-            depth_map=depth_map,
-            depth_estimator=depth_estimator,
             ego_left=road_state.ego_left,
             ego_right=road_state.ego_right,
             frame_transform=frame_transform,
             road_state_confirmed=road_state.is_confirmed,
+            road_status=road_state.status,
+            left_corridor_3d=road_state.left_corridor_3d,
+            right_corridor_3d=road_state.right_corridor_3d,
+            dt=1.0 / source_fps,
+            ego_speed_mps=speed_mps,
         )
 
         t1 = time.time()
@@ -174,15 +181,9 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
         fps = 1.0 / max(0.001, frame_time)
         fps_history.append(fps)
 
+        cipo_status = tracker.last_cipo_status
         if cipo_obj is not None:
-            cipo_status = "DANGER" if cipo_obj["Z_3d"] < tracker.danger_dist else (
-                "WARNING" if cipo_obj["Z_3d"] < tracker.warning_dist else "SAFE"
-            )
             cipo_obj["status"] = cipo_status
-        elif road_state.status != "CONFIRMED":
-            cipo_status = "DEGRADED"
-        else:
-            cipo_status = "SAFE"
 
         # Step F: Render 3-Panel Split Window (Front View + BEV + HUD)
         front_view = draw_front_view_cipo(

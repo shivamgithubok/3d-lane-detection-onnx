@@ -163,7 +163,7 @@ class OfflineYOLOVehicleDetector:
             if det["track_id"] > 0:
                 used.add(det["track_id"])
                 continue
-            best_iou, best_id = 0.35, None
+            best_iou, best_id = 0.20, None
             for p in prev:
                 pid = p["track_id"]
                 if pid in used:
@@ -175,8 +175,9 @@ class OfflineYOLOVehicleDetector:
                 det["track_id"] = best_id
                 used.add(best_id)
             else:
-                det["track_id"] = self._next_fallback_id
-                self._next_fallback_id += 1
+                # Do not mint a new id: occlusion / ByteTrack miss should
+                # coast the old 3D track instead of spawning a ghost car.
+                det["track_id"] = -1
         return detections
 
     def detect(self, frame):

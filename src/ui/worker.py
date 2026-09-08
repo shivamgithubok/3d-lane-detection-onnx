@@ -1,10 +1,9 @@
 """
-PySide6 Async Triple-TensorRT Full ADAS Pipeline Worker Thread
+PySide6 Async TensorRT ADAS Pipeline Worker Thread
 Runs:
  1. 3D Anchor Lane TensorRT Engine
  2. YOLOv8 Vehicle Detector TensorRT Engine
- 3. MiDaS Monocular Depth Estimator TensorRT Engine
- 4. CIPO Tracker & Drivable Area Corridor Pipeline
+ 3. CIPO Tracker (ground-plane range + constant-velocity coast)
 """
 
 import cv2
@@ -15,7 +14,6 @@ from PySide6.QtCore import QThread, Signal
 from src.inference.postprocess import postprocess_onnx_output
 from src.inference.lane_preprocess import prepare_lane_input
 from src.inference.cipo_tracker import CIPOTracker
-from src.inference.trt_depth_estimator import TRTMonocularDepthEstimator
 from src.inference.object_detector import OfflineYOLOVehicleDetector
 from src.utils.split_visualization import draw_front_view_cipo
 from src.utils.camera_transform import CameraTransform
@@ -27,6 +25,7 @@ from src.utils.calibration import (
     OPENLANE_CAM_PITCH_DEG,
     OPENLANE_CAM_HEIGHT,
 )
+from src.utils.ground_calib import GroundCalibration
 
 INPUT_H, INPUT_W = 360, 480
 
@@ -59,6 +58,7 @@ class InferenceWorker(QThread):
         self.calib_pitch = float(pitch)
         self.calib_height = float(height)
         self.P_matrix = make_P_matrix(OPENLANE_CAM_PITCH_DEG, OPENLANE_CAM_HEIGHT)
+        self.ground_calib = GroundCalibration.for_video(video_path)
 
     def set_calibration(self, pitch_deg, height_m):
         """
@@ -77,7 +77,6 @@ class InferenceWorker(QThread):
         trt_engine = None
         trt_context = None
 
-        depth_estimator = None
         tracker = None
         detector = None
         road_state_estimator = RoadStateEstimator()
@@ -149,18 +148,22 @@ class InferenceWorker(QThread):
                     except Exception:
                         pass
 
-                # 3. Load Monocular Depth Estimator Engine
-                if os.path.exists(self.depth_engine_path):
-                    depth_estimator = TRTMonocularDepthEstimator(self.depth_engine_path)
-
-                # 4. Initialize CIPO Tracker
-                tracker = CIPOTracker(P_matrix=self.P_matrix, danger_dist=15.0, warning_dist=30.0)
+                # 3. CIPO tracker: OpenLane P for lanes, measured calib for objects
+                tracker = CIPOTracker(
+                    P_matrix=self.P_matrix,
+                    danger_dist=15.0,
+                    warning_dist=30.0,
+                    ground_calib=self.ground_calib,
+                )
+                tracker._video_path = self.video_path
                 self.status_message.emit(
-                    f"Calib pitch={self.calib_pitch:.1f}° h={self.calib_height:.1f}m"
+                    f"Lanes P locked OpenLane; objects "
+                    f"f={self.ground_calib.f_px:.0f} h={self.ground_calib.cam_height_m:.2f}m "
+                    f"({self.ground_calib.source})"
                 )
 
                 use_trt = True
-                self.status_message.emit("🚀 Triple-TensorRT Engines Ready (Lanes + YOLO + MiDaS Depth)")
+                self.status_message.emit("Engines ready: lanes + YOLO (ground-plane range)")
             except Exception as e:
                 self.status_message.emit(f"TensorRT Init Warning: {e}")
 
@@ -171,9 +174,7 @@ class InferenceWorker(QThread):
 
         fps_history = []
         frame_i = 0
-        last_depth_map = None
         last_source_ms = None
-        DEPTH_EVERY_N = 2  # reuse depth on alternate frames → big FPS win on Orin
 
         try:
             while self.running:
@@ -202,6 +203,7 @@ class InferenceWorker(QThread):
                 cipo_obj = None
                 cipo_status = "SAFE"
                 ego_left, ego_right = None, None
+                left_3d, right_3d = None, None
                 speed_mps = None
 
                 if frame is not None and use_trt:
@@ -223,12 +225,12 @@ class InferenceWorker(QThread):
                     road_state = road_state_estimator.update(
                         raw_proposals, dt=source_dt, speed_mps=speed_mps
                     )
-                    # Render immediate measurements while tracks acquire; only
-                    # confirmed/predicted tracks may feed CIPO safety logic.
+                    # Render immediate measurements while tracks acquire.
+                    # CONFIRMED and PREDICTED corridors both feed CIPO.
                     proposals = road_state.visual_lanes
                     safety_lanes = road_state.lanes
 
-                    # Step B: YOLO Vehicle Detection & Depth Map Estimation
+                    # Step B: YOLO Vehicle Detection
                     # Pop pycuda context so Ultralytics/TensorRT YOLO can use the GPU (P0)
                     if cuda_ctx is not None:
                         try:
@@ -243,45 +245,33 @@ class InferenceWorker(QThread):
                                 cuda_ctx.push()
                             except Exception:
                                 pass
-                    depth_map = last_depth_map
-                    if depth_estimator and (frame_i % DEPTH_EVERY_N == 0 or last_depth_map is None):
-                        depth_map, _, _ = depth_estimator.estimate_depth_map(frame)
-                        last_depth_map = depth_map
 
                     # Step C: CIPO Tracker & 3D In-Path Association
                     h_frame, w_frame = frame.shape[:2]
                     ego_left, ego_right = road_state.ego_left, road_state.ego_right
-                    # Live Cal panel → keep CIPO P in sync
+                    left_3d = road_state.left_corridor_3d
+                    right_3d = road_state.right_corridor_3d
                     if tracker is not None:
                         tracker.P = np.asarray(self.P_matrix, dtype=np.float64)
-                    if tracker and (raw_detections or proposals is not None):
+                    if tracker is not None:
                         processed_objs, cipo_obj = tracker.process_detections(
                             raw_detections,
                             safety_lanes,
                             frame_size=(w_frame, h_frame),
-                            depth_map=depth_map,
-                            depth_estimator=depth_estimator,
                             ego_left=ego_left,
                             ego_right=ego_right,
                             frame_transform=frame_transform,
                             road_state_confirmed=road_state.is_confirmed,
+                            road_status=road_state.status,
+                            left_corridor_3d=left_3d,
+                            right_corridor_3d=right_3d,
+                            dt=source_dt,
+                            ego_speed_mps=speed_mps,
                         )
-
-                        # Find Closest In-Path Object (CIPO)
-                        in_path_objs = [obj for obj in processed_objs if obj['in_path']]
-                        if in_path_objs and road_state.is_confirmed:
-                            cipo_obj = min(in_path_objs, key=lambda o: o['Z_3d'])
-                            dist_z = cipo_obj['Z_3d']
-                            cipo_status = "DANGER" if dist_z < 15.0 else ("WARNING" if dist_z < 30.0 else "SAFE")
-                            cipo_obj['status'] = cipo_status
-                        elif road_state.status != "CONFIRMED":
-                            cipo_status = "DEGRADED"
+                        cipo_status = tracker.last_cipo_status
 
                 # Step D: All rendering reads the same validated temporal road state.
-                if frame is not None and use_trt:
-                    left_3d = road_state.left_corridor_3d
-                    right_3d = road_state.right_corridor_3d
-                else:
+                if frame is None or not use_trt:
                     left_3d, right_3d = None, None
 
                 # Step E: Render Front View Overlay (Lanes + Drivable Corridor + 3D Bboxes)

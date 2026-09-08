@@ -87,8 +87,8 @@ LANE_CHANGE_DWELL_FRAMES = 8   # ~0.27 s at 30 fps
 
 # --- One-sided ego reconstruct (P1) ---
 # If only one ego paint line is measured, rebuild the missing side from a
-# locked width. Visualization / BEV may use it; CIPO stays fail-closed
-# because RoadState.status will be PREDICTED, not CONFIRMED.
+# locked width. Visualization / BEV use it; CIPO treats this as probable
+# (PREDICTED), not a hard blank.
 ENABLE_ONESIDED_RECONSTRUCT = True
 ONESIDED_MAX_Y_M = 40.0        # only invent the missing side in the near field
 ONESIDED_HOLD_FRAMES = LANE_HOLD_FRAMES
@@ -112,8 +112,18 @@ CLAHE_CLIP = 2.5
 CLAHE_TILE = 8
 DARK_CONF_THRESHOLD = 0.38      # slightly below day conf for dark frames
 
-# --- CIPO / P1 in-path hysteresis ---
-CIPO_ENTER_HITS = 2            # frames inside before marking in_path
-CIPO_EXIT_MISS = 4             # frames outside before clearing in_path
-CIPO_U_MARGIN_PX = 3.0         # pixel slack around projected ego lines
-CIPO_X_MARGIN_M = 0.35         # extra meters beyond measured ego half-width
+# --- CIPO occupancy / hysteresis ---
+# Score = vehicle-interval overlap with the ego corridor (0–1).
+CIPO_SCORE_ENTER_HIGH = 0.60   # enter in-path on this frame
+CIPO_SCORE_ENTER = 0.45        # enter after CIPO_ENTER_HITS
+CIPO_SCORE_HOLD = 0.25         # stay in-path while score stays above this
+CIPO_ENTER_HITS = 2            # medium-score frames before marking in_path
+CIPO_EXIT_MISS = 8             # low-score frames before clearing in_path
+CIPO_U_MARGIN_PX = 8.0         # 2D fallback slack around projected ego lines
+CIPO_X_MARGIN_M = 0.40         # base meters beyond corridor edges
+CIPO_X_MARGIN_PER_Z = 0.02     # extra meters per meter of range
+CIPO_STICK_MARGIN_M = 5.0      # challenger must be this much closer to steal CIPO
+CIPO_DANGER_ENTER_M = 14.0
+CIPO_DANGER_EXIT_M = 17.0
+CIPO_WARN_ENTER_M = 28.0
+CIPO_WARN_EXIT_M = 32.0

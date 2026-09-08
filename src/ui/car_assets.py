@@ -91,11 +91,12 @@ KIND_ASSETS = {
 }
 
 # Max simultaneous instances per mesh (Tesla is ~684k tris — one copy only).
+# SHC native units are meters; the old 0.01 scale made in-path cars ~5 cm tall.
 KIND_MAX = {
-    KIND_SKODA: 3,
+    KIND_SKODA: 8,
     KIND_TESLA: 0,  # skipped until GLB rest pose is fixed
-    KIND_SHC: 1,
-    KIND_DODGE: 1,
+    KIND_SHC: 0,    # skipped: 0.01 scale rendered a speck at the CIPO marker
+    KIND_DODGE: 2,
 }
 
 
