@@ -89,6 +89,7 @@ Item {
     property bool laneValid: false
     property bool laneHeld: false
     property real targetCarLength: 4.6
+    property real targetTruckLength: 10.0
     property bool egoFitted: false
     property bool skodaFitted: false
     property bool shcFitted: false
@@ -522,8 +523,10 @@ Item {
                      : (kind === 0) ? root.skodaY
                      : (kind === 2) ? root.shcY
                      : root.dodgeY
-            node.position = Qt.vector3d(r.posX, py, r.posZ)
-            node.eulerRotation = Qt.vector3d(0, root.egoRotY, 0)
+            node.x = r.posX
+            node.y = py
+            node.z = r.posZ
+            node.eulerRotation = Qt.vector3d(0, (r.yawDeg !== undefined ? r.yawDeg : root.egoRotY), 0)
             // Far cars otherwise shrink to specks in the chase camera.
             const z = Math.max(0.0, -r.posZ)
             const boost = (z > 18.0) ? Math.min(1.9, 1.0 + 0.016 * (z - 18.0)) : 1.0
@@ -595,7 +598,7 @@ Item {
         console.log("[BEV] ego fit", root.egoDebug)
     }
 
-    function fitMeshToCarLength(loader) {
+    function fitMeshToCarLength(loader, targetLen) {
         if (!loader || loader.status !== RuntimeLoader.Success)
             return null
         const mn = loader.bounds.minimum
@@ -606,7 +609,8 @@ Item {
         const longest = Math.max(dx, dy, dz)
         if (longest < 1e-4)
             return null
-        const s = root.targetCarLength / longest
+        const want = (targetLen === undefined || targetLen === null) ? root.targetCarLength : targetLen
+        const s = want / longest
         return { s: s, y: -Math.min(mn.y, mx.y) * s, longest: longest }
     }
 
@@ -631,13 +635,13 @@ Item {
     }
 
     function fitDodgeFromBounds() {
-        const f = fitMeshToCarLength(dodgeLoader)
+        const f = fitMeshToCarLength(dodgeLoader, root.targetTruckLength)
         if (!f)
             return
         root.dodgeScale = f.s
         root.dodgeY = f.y
         root.dodgeFitted = true
-        console.log("[BEV] dodge fit longest", f.longest.toFixed(3), "scale", f.s.toFixed(3), "y", f.y.toFixed(3))
+        console.log("[BEV] truck fit longest", f.longest.toFixed(3), "scale", f.s.toFixed(3), "y", f.y.toFixed(3))
     }
 
     function fitTeslaFromBounds() {
@@ -921,7 +925,12 @@ Item {
         }
 
         // Pooled traffic: one RuntimeLoader per slot, source set once.
-        Node {
+        component TrafficRig: Node {
+            visible: false
+            Behavior on x { NumberAnimation { duration: 80; easing.type: Easing.Linear } }
+            Behavior on z { NumberAnimation { duration: 80; easing.type: Easing.Linear } }
+        }
+        TrafficRig {
             id: skoda0
             visible: false
             RuntimeLoader {
@@ -930,7 +939,7 @@ Item {
                 scale: Qt.vector3d(root.skodaScale, root.skodaScale, root.skodaScale)
             }
         }
-        Node {
+        TrafficRig {
             id: skoda1
             visible: false
             RuntimeLoader {
@@ -938,7 +947,7 @@ Item {
                 scale: Qt.vector3d(root.skodaScale, root.skodaScale, root.skodaScale)
             }
         }
-        Node {
+        TrafficRig {
             id: skoda2
             visible: false
             RuntimeLoader {
@@ -946,7 +955,7 @@ Item {
                 scale: Qt.vector3d(root.skodaScale, root.skodaScale, root.skodaScale)
             }
         }
-        Node {
+        TrafficRig {
             id: skoda3
             visible: false
             RuntimeLoader {
@@ -954,7 +963,7 @@ Item {
                 scale: Qt.vector3d(root.skodaScale, root.skodaScale, root.skodaScale)
             }
         }
-        Node {
+        TrafficRig {
             id: skoda4
             visible: false
             RuntimeLoader {
@@ -962,7 +971,7 @@ Item {
                 scale: Qt.vector3d(root.skodaScale, root.skodaScale, root.skodaScale)
             }
         }
-        Node {
+        TrafficRig {
             id: skoda5
             visible: false
             RuntimeLoader {
@@ -970,7 +979,7 @@ Item {
                 scale: Qt.vector3d(root.skodaScale, root.skodaScale, root.skodaScale)
             }
         }
-        Node {
+        TrafficRig {
             id: skoda6
             visible: false
             RuntimeLoader {
@@ -978,7 +987,7 @@ Item {
                 scale: Qt.vector3d(root.skodaScale, root.skodaScale, root.skodaScale)
             }
         }
-        Node {
+        TrafficRig {
             id: skoda7
             visible: false
             RuntimeLoader {
@@ -986,7 +995,7 @@ Item {
                 scale: Qt.vector3d(root.skodaScale, root.skodaScale, root.skodaScale)
             }
         }
-        Node {
+        TrafficRig {
             id: tesla0
             visible: false
             // Inner node: cancel Tesla GLB extra X-90. Outer node yaw = ego (180).
@@ -1015,7 +1024,7 @@ Item {
             running: skodaLoader.status === RuntimeLoader.Success && !root.skodaFitted
             onTriggered: root.fitSkodaFromBounds()
         }
-        Node {
+        TrafficRig {
             id: shc0
             visible: false
             RuntimeLoader {
@@ -1032,7 +1041,7 @@ Item {
             running: shcLoader.status === RuntimeLoader.Success && !root.shcFitted
             onTriggered: root.fitShcFromBounds()
         }
-        Node {
+        TrafficRig {
             id: truck0
             visible: false
             RuntimeLoader {
@@ -1041,7 +1050,7 @@ Item {
                 scale: Qt.vector3d(root.dodgeScale, root.dodgeScale, root.dodgeScale)
             }
         }
-        Node {
+        TrafficRig {
             id: truck1
             visible: false
             RuntimeLoader {

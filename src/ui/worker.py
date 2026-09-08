@@ -47,7 +47,6 @@ class InferenceWorker(QThread):
         self.video_path = video_path
         self.engine_path = model_path if model_path.endswith('.engine') else "models/anchor3dlane_raw.engine"
         self.yolo_engine_path = "models/yolov8n.engine"
-        self.depth_engine_path = "models/monocular_depth.engine"
         self.running = False
         self.paused = False
         # YOLO is created on the worker thread after CUDA is ready (avoids empty/missed frames)
@@ -58,16 +57,32 @@ class InferenceWorker(QThread):
         self.calib_pitch = float(pitch)
         self.calib_height = float(height)
         self.P_matrix = make_P_matrix(OPENLANE_CAM_PITCH_DEG, OPENLANE_CAM_HEIGHT)
-        self.ground_calib = GroundCalibration.for_video(video_path)
+        self._calib_base = GroundCalibration.for_video(video_path)
+        self.ground_calib = self._calib_base
+        self._ui_pitch = None
+        self._ui_height = None
 
     def set_calibration(self, pitch_deg, height_m):
-        """
-        Cal panel no longer rebuilds P. Live pitch/height changes break
-        model-3D ↔ image projection consistency (narrow/skewed red corridor).
-        """
+        """OpenLane P stays locked. Use set_object_calib for ranging sliders."""
         self.calib_pitch = OPENLANE_CAM_PITCH_DEG
         self.calib_height = OPENLANE_CAM_HEIGHT
         self.P_matrix = make_P_matrix(OPENLANE_CAM_PITCH_DEG, OPENLANE_CAM_HEIGHT)
+
+    def set_object_calib(self, pitch_deg, height_m):
+        """Live Pitch/H sliders retune object ranging only (this camera)."""
+        self._ui_pitch = float(pitch_deg)
+        self._ui_height = float(height_m)
+        self._apply_object_calib()
+
+    def _apply_object_calib(self, width=None, height=None):
+        gc = self._calib_base
+        if gc is None:
+            return
+        if width and height:
+            gc = gc.adapted_to(int(width), int(height))
+        if self._ui_pitch is not None and self._ui_height is not None:
+            gc = gc.with_pitch_height(self._ui_pitch, self._ui_height)
+        self.ground_calib = gc
 
     def run(self):
         self.running = True
@@ -253,6 +268,8 @@ class InferenceWorker(QThread):
                     right_3d = road_state.right_corridor_3d
                     if tracker is not None:
                         tracker.P = np.asarray(self.P_matrix, dtype=np.float64)
+                        self._apply_object_calib(w_frame, h_frame)
+                        tracker.ground_calib = self.ground_calib
                     if tracker is not None:
                         processed_objs, cipo_obj = tracker.process_detections(
                             raw_detections,

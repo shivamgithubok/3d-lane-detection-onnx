@@ -343,6 +343,24 @@ class GroundCalibration:
         """Replace only the horizon row, for online pitch tracking."""
         return GroundCalibration(**{**asdict(self), "v_vp": float(v_vp)})
 
+    def with_pitch_height(self, pitch_deg: float, cam_height_m: float
+                          ) -> "GroundCalibration":
+        """UI retune of *this* camera. Never writes OpenLane P.
+
+        Pitch moves v_vp about the image centre: v_vp = cy + f tan(pitch).
+        Height scales range and lateral together. u_vp and f stay put.
+        """
+        pitch = math.radians(float(pitch_deg))
+        cy = 0.5 * float(self.source_height)
+        v_vp = cy + float(self.f_px) * math.tan(pitch)
+        lo, hi = 0.25 * self.source_height, 0.90 * self.source_height
+        return GroundCalibration(**{
+            **asdict(self),
+            "v_vp": float(np.clip(v_vp, lo, hi)),
+            "cam_height_m": float(np.clip(cam_height_m, 0.6, 3.0)),
+            "source": f"{self.source}+ui",
+        })
+
     # ------------------------------------------------------------------- io
     def to_json(self, path: str) -> None:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)

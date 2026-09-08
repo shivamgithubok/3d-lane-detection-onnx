@@ -300,39 +300,55 @@ class CIPOTracker:
         # Small within-lane offset from geometry, without collapsing lanes
         return snapped + 0.12 * float(np.clip(x_geom - snapped, -1.5, 1.5))
 
-    def _lane_rank(self, u_model, v_model, x_3d, y_fwd, ego_left, ego_right):
-        """
-        0 = ego lane, 1 = adjacent (2nd) lane, 2+ = outer / 3rd+ lanes.
+    def _lane_from_image(self, u_model, v_model, x_3d, y_fwd, ego_left, ego_right):
+        """Signed lane index from the *image*, plus a small within-lane offset.
 
-        Boundaries are sampled at the object's own range, not a hardcoded 25 m.
+        Object metric X and OpenLane lane X are different cameras. The BEV
+        ribbon is the lane net; the box the user sees is YOLO. Match those
+        two, not X_3d vs the corridor.
+        0 = ego, −1 left, +1 right.
         """
-        u_left = self.get_2d_lane_u_at_v(ego_left, v_model) if ego_left is not None else None
-        u_right = self.get_2d_lane_u_at_v(ego_right, v_model) if ego_right is not None else None
+        lane_w = STANDARD_LANE_WIDTH
         x_left = self.get_lane_x_at_y(ego_left, y_fwd)
         x_right = self.get_lane_x_at_y(ego_right, y_fwd)
         if x_left is not None and x_right is not None:
-            ego_half = 0.5 * abs(x_right - x_left)
-            lane_w = max(STANDARD_LANE_WIDTH, abs(x_right - x_left))
-        else:
-            ego_half = STANDARD_LANE_WIDTH * 0.5
-            lane_w = STANDARD_LANE_WIDTH
+            lane_w = float(np.clip(abs(x_right - x_left), 2.8, 4.6))
 
-        # ~80 model-px ≈ one adjacent lane in image space
-        adj_px = 85.0
+        u_left = self.get_2d_lane_u_at_v(ego_left, v_model, slack_px=24.0) if ego_left is not None else None
+        u_right = self.get_2d_lane_u_at_v(ego_right, v_model, slack_px=24.0) if ego_right is not None else None
+        if u_left is not None and u_right is not None:
+            if u_right < u_left:
+                u_left, u_right = u_right, u_left
+            width_px = max(18.0, float(u_right - u_left))
+            if u_model < u_left:
+                n = int(np.floor((u_left - u_model) / width_px + 0.5))
+                idx = -int(np.clip(max(1, n), 1, 2))
+                lane_l = u_left + idx * width_px
+                frac = (u_model - lane_l) / width_px
+            elif u_model > u_right:
+                n = int(np.floor((u_model - u_right) / width_px + 0.5))
+                idx = int(np.clip(max(1, n), 1, 2))
+                lane_l = u_right + (idx - 1) * width_px
+                frac = (u_model - lane_l) / width_px
+            else:
+                idx = 0
+                frac = (u_model - u_left) / width_px
+            offset = float(np.clip((frac - 0.5) * lane_w, -1.15, 1.15))
+            return idx, offset
 
-        if u_left is not None and u_model < u_left - 3.0:
-            px = (u_left - 3.0) - u_model
-            return 1 if px <= adj_px else 2
-        if u_right is not None and u_model > u_right + 3.0:
-            px = u_model - (u_right + 3.0)
-            return 1 if px <= adj_px else 2
+        # No ego pair this frame: last-resort metric, still signed.
+        if abs(x_3d) <= 0.55 * lane_w:
+            return 0, float(np.clip(x_3d, -1.15, 1.15))
+        idx = int(np.clip(round(x_3d / lane_w), -2, 2))
+        if idx == 0:
+            idx = 1 if x_3d > 0 else -1
+        return idx, float(np.clip(x_3d - idx * lane_w, -1.15, 1.15))
 
-        # Inside ego corridor in image, or unknown 2D → refine with X
-        if abs(x_3d) <= ego_half + 0.6:
-            return 0
-        if abs(x_3d) <= ego_half + lane_w * 1.15:
-            return 1
-        return 2
+    def _lane_rank(self, u_model, v_model, x_3d, y_fwd, ego_left, ego_right):
+        idx, _ = self._lane_from_image(
+            u_model, v_model, x_3d, y_fwd, ego_left, ego_right
+        )
+        return abs(int(idx))
 
     def _predict_cv(self, st, dt):
         dt = float(np.clip(dt, 0.01, 0.12))
@@ -530,6 +546,10 @@ class CIPOTracker:
             "is_cipo": False,
             "cipo_quality": quality,
             "lane_rank": int(st.get("lane_rank", 1)),
+            "lane_index": int(st.get("lane_index", 0)),
+            "lane_offset_m": float(st.get("lane_offset_m", 0.0)),
+            "vx": float(st.get("vx", 0.0)),
+            "vy": float(st.get("vy", 0.0)),
             "show_bev": True,
         }
 
@@ -547,7 +567,10 @@ class CIPOTracker:
         return int(best_id) if best_id is not None else track_id
 
     def _select_cipo(self, processed_objects):
-        in_path_objs = [obj for obj in processed_objects if obj["in_path"]]
+        in_path_objs = [
+            obj for obj in processed_objects
+            if obj["in_path"] and int(obj.get("lane_index", 0)) == 0
+        ]
         if not in_path_objs:
             self._cipo_tid = None
             return None
@@ -732,24 +755,30 @@ class CIPOTracker:
             else:
                 score = None
             in_path, path_score = self._in_path_from_score(tr.track_id, score)
-            lane_rank = self._lane_rank(
+            lane_index, _lane_offset = self._lane_from_image(
                 tr.u_model, tr.v_model, x, z, ego_left, ego_right
             )
-            tr.in_path = in_path
+            lane_rank = abs(int(lane_index))
+            # Occupancy may overlap a neighbour; BEV lane is the image label.
+            tr.in_path = bool(in_path) and int(lane_index) == 0
             tr.path_score = path_score
             tr.lane_rank = lane_rank
             st = {
                 "x": x,
                 "z": z,
+                "vx": float(tr.x[2]),
+                "vy": float(tr.x[3]),
                 "bbox": list(bbox),
                 "label": tr.label,
                 "track_id": tr.track_id,
                 "conf": tr.conf,
                 "v_model": tr.v_model,
                 "lane_rank": lane_rank,
+                "lane_index": int(lane_index),
+                "lane_offset_m": 0.0,
                 "range_gate": tr.range_gate,
             }
-            processed_objects.append(self._pack_obj(st, in_path, path_score, quality))
+            processed_objects.append(self._pack_obj(st, tr.in_path, path_score, quality))
 
         self._inpath_state = {
             k: v for k, v in self._inpath_state.items()

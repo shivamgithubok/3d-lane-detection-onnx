@@ -36,10 +36,12 @@ import numpy as np
 # counted as that lane's occupant. Covers straddling during a lane change.
 LANE_TOLERANCE_FRAC = 0.35
 
-# Hysteresis on the discrete index only. The rendered position stays continuous,
-# so this cannot cause the visible teleporting the old sticky-slot logic did.
+# Hysteresis on the discrete index. Entering ego is harder than staying aside.
 ASSIGN_ENTER_HITS = 3
 ASSIGN_EXIT_MISS = 5
+ENTER_EGO_HITS = 3
+LEAVE_EGO_HITS = 5
+SIDE_CHANGE_HITS = 3
 
 
 @dataclass
@@ -90,6 +92,27 @@ class LaneModel:
     def lane_center_x(self, lane_index: int, y) -> np.ndarray:
         """Centre of lane `lane_index` (0 = ego, -1 = left, +1 = right) at y."""
         return self.center_x(y) + float(lane_index) * self.lane_width_m
+
+    def shape_tangent(self, y) -> float:
+        """dx/dy of the render-frame centreline (pose removed, curvature only)."""
+        y = float(y)
+        c = self.coeffs
+        return 2.0 * float(c[2]) * y + 3.0 * float(c[3]) * y * y
+
+    def heading_yaw_deg(self, y, oncoming: bool = False) -> float:
+        """Qt Y-euler for a vehicle sitting on the ribbon at forward distance y.
+
+        Same convention as lane segments: atan2(dx, -dy). Straight same-direction
+        traffic is 180° (faces −Z). Oncoming is that plus 180°.
+        """
+        xp = self.shape_tangent(y)
+        if oncoming:
+            return float(np.degrees(np.arctan2(-xp, 1.0)))
+        yaw = float(np.degrees(np.arctan2(xp, -1.0)))
+        # Left curves come back as ~-173°; wrap so they stay next to the 180° base.
+        if yaw < 0.0:
+            yaw += 360.0
+        return yaw
 
 
 def assign_lane(
@@ -174,22 +197,33 @@ class LaneAssigner:
         idx, offset = assign_lane(x_m, y_m, lane, self.max_index)
         if idx is None:
             return None, offset
+        return self.update_index(track_id, idx, offset)
+
+    def update_index(self, track_id: int, idx: int, offset: float
+                     ) -> Tuple[int, float]:
+        """Sticky left/right; ego only after ENTER_EGO_HITS image frames."""
+        idx = int(np.clip(idx, -self.max_index, self.max_index))
         st = self._state.get(track_id)
         if st is None:
             self._state[track_id] = {"idx": idx, "cand": idx, "hits": 0, "miss": 0}
-            return idx, offset
+            return idx, float(offset)
         if idx == st["idx"]:
             st["hits"], st["miss"], st["cand"] = 0, 0, idx
-            return st["idx"], offset
+            return st["idx"], float(offset)
         if idx == st["cand"]:
             st["hits"] += 1
         else:
             st["cand"], st["hits"] = idx, 1
-        if st["hits"] >= ASSIGN_ENTER_HITS:
+        need = ENTER_EGO_HITS
+        if st["idx"] == 0 and idx != 0:
+            need = LEAVE_EGO_HITS
+        elif st["idx"] != 0 and idx == 0:
+            need = ENTER_EGO_HITS
+        else:
+            need = SIDE_CHANGE_HITS
+        if st["hits"] >= need:
             st["idx"], st["hits"] = idx, 0
-        cur = int(st["idx"])
-        offset = float(x_m) - float(lane.lane_center_x(cur, float(y_m)))
-        return cur, offset
+        return int(st["idx"]), float(offset)
 
     def drop(self, live_ids) -> None:
         live = set(int(t) for t in live_ids)

@@ -108,6 +108,10 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
     frame_idx = 0
     fps_history = []
     start_total_time = time.time()
+    lane_hist = {}
+    n_corr = 0
+    n_inpath = 0
+    n_bev3 = 0
 
     print("[Pipeline] Starting inference loop...")
     while cap.isOpened():
@@ -185,6 +189,16 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
         if cipo_obj is not None:
             cipo_obj["status"] = cipo_status
 
+        if road_state.has_valid_corridor:
+            n_corr += 1
+        for o in processed_objs:
+            li = int(o.get("lane_index", 99))
+            lane_hist[li] = lane_hist.get(li, 0) + 1
+            if o.get("in_path"):
+                n_inpath += 1
+            if abs(li) <= 1:
+                n_bev3 += 1
+
         # Step F: Render 3-Panel Split Window (Front View + BEV + HUD)
         front_view = draw_front_view_cipo(
             frame,
@@ -246,6 +260,9 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
     print(f" Total Elapsed Time:     {total_time:.2f} seconds")
     print(f" Average Overall Speed:  {avg_fps_overall:.2f} FPS")
     print(f" Peak Frame Speed:       {np.max(fps_history):.2f} FPS")
+    print(f" Corridor frames:        {n_corr}/{frame_idx}")
+    print(f" Lane index counts:      {dict(sorted(lane_hist.items()))}")
+    print(f" in_path objects:        {n_inpath}   BEV 3-lane objects: {n_bev3}")
     print(f" Annotated Output Video: {output_path}")
     print("================================================================\n")
 

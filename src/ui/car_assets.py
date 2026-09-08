@@ -27,10 +27,12 @@ class CarAsset:
     rot_y: float = 180.0
     rot_z: float = 0.0
     y: float = 0.0
+    directory: str = ""
 
     @property
     def path(self) -> str:
-        return os.path.join(_OBJ_DIR, self.filename)
+        root = self.directory or _OBJ_DIR
+        return os.path.join(root, self.filename)
 
     def exists(self) -> bool:
         return os.path.isfile(self.path)
@@ -74,9 +76,10 @@ TRAFFIC_SHC = CarAsset(
 )
 
 TRAFFIC_DODGE = CarAsset(
-    name="dodge_ram",
-    filename="dodge_ram_1500_rebel.glb",
-    scale=0.05,
+    name="truck",
+    filename="truck.glb",
+    directory=os.path.join(_ROOT, "data", "3d_truck"),
+    scale=1.0,
     rot_y=180.0,
     y=0.0,
 )

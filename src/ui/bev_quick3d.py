@@ -15,10 +15,11 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 
 import numpy as np
 
-from PySide6.QtCore import QUrl, Qt
+from PySide6.QtCore import QUrl, Qt, QTimer
 from PySide6.QtQuickWidgets import QQuickWidget
 
 from src.ui.car_assets import (
@@ -51,9 +52,14 @@ DEFAULT_CALIB_H = 1.0
 
 # Layer A: ego body keep-out (half sedan length ~2.3 m + bumper margin).
 EGO_KEEP_OUT_M = 5.0
+# Render-tick coast between ~12 Hz inference frames.
+MAX_EXTRAPOLATE_S = 0.20
 
-TRAFFIC_LANE_MAX = 2          # hide |lane| > 2 (3rd+ outer)
+TRAFFIC_LANE_MAX = 1          # BEV: ego + one each side; rest stay camera-only
 DEFAULT_LANE_W_M = 3.7
+SAME_LANE_GAP_M = 8.0         # min range gap for two cars in the same lane
+ONCOMING_VY_MPS = -12.0       # range-rate: faster close than a typical lead car
+ONCOMING_HITS = 3
 
 # Uniform sampling of every lane-frame polyline. Constant across frames.
 POLY_SAMPLES = 48
@@ -127,11 +133,14 @@ class BevQuick3DWidget(QQuickWidget):
         self._slots = _SlotTracker()
         self._tid_slot = {}   # track_id → (mesh_kind, mesh_pool_index)
         self._lane_assign = LaneAssigner(max_index=TRAFFIC_LANE_MAX)
+        self._oncoming = {}   # tid -> {flag, hits}
         self._last_traffic_json = None
         self._last_corridor_json = None
         self._last_lane_json = None
         self._last_dash_json = None
         self._last_edge_json = None
+        self._traffic_seed = []
+        self._traffic_t0 = 0.0
 
         self.setSource(QUrl.fromLocalFile(os.path.abspath(_QML_PATH)))
         if self.status() == QQuickWidget.Error:
@@ -149,6 +158,10 @@ class BevQuick3DWidget(QQuickWidget):
         )
         self._set("envMode", self.env_mode)
         self._bind_ego_asset()
+        self._extrap = QTimer(self)
+        self._extrap.setInterval(33)
+        self._extrap.timeout.connect(self._on_extrap_tick)
+        self._extrap.start()
 
     def _root(self):
         return self.rootObject()
@@ -185,7 +198,9 @@ class BevQuick3DWidget(QQuickWidget):
         if TRAFFIC_DODGE.exists():
             self._set("dodgeGltf", asset_url(TRAFFIC_DODGE))
             self._set("dodgeScale", float(TRAFFIC_DODGE.scale))
-            print(f"[BEV] Traffic Dodge: {TRAFFIC_DODGE.path}")
+            print(f"[BEV] Traffic truck: {TRAFFIC_DODGE.path}")
+        else:
+            print(f"[BEV] Traffic truck missing: {TRAFFIC_DODGE.path}")
 
     def _push_camera(self, pitch, yaw, zoom, calib_pitch, calib_h, pan_x, pan_y):
         self._set("pitchDeg", float(pitch))
@@ -253,10 +268,12 @@ class BevQuick3DWidget(QQuickWidget):
         # Layer A: never draw into the ego GLB body.
         if not (EGO_KEEP_OUT_M < z <= BEV_MAX_DIST_M):
             return False
-        if abs(x) > BEV_MAX_LATERAL_M:
-            return False
-        # Outer / 3rd+ lanes stay off the overlay: too sparse to be useful.
+        # Lateral hide uses image lane index, not metric X (X is a different camera).
         if int(obj.get("lane_rank", 0)) > TRAFFIC_LANE_MAX:
+            return False
+        if abs(int(obj.get("lane_index", 0))) > TRAFFIC_LANE_MAX:
+            return False
+        if abs(x) > BEV_MAX_LATERAL_M and obj.get("lane_index") is None:
             return False
         return True
 
@@ -274,9 +291,24 @@ class BevQuick3DWidget(QQuickWidget):
         raw = int(round(x_lf / w))
         return int(np.clip(raw, -TRAFFIC_LANE_MAX, TRAFFIC_LANE_MAX))
 
-    def _heading_yaw(self, obj) -> float:
-        # Highway same-direction traffic: every car faces like ego.
-        return _YAW_AWAY
+    def _heading_yaw(self, obj, y, lane_model) -> float:
+        """Face along the lane tangent at this car's range."""
+        tid = int(obj.get("track_id", -1))
+        meas = float(obj.get("vy", 0.0)) < ONCOMING_VY_MPS
+        st = self._oncoming.get(tid)
+        if st is None:
+            st = {"flag": False, "hits": 0}
+            self._oncoming[tid] = st
+        if meas == st["flag"]:
+            st["hits"] = 0
+        else:
+            st["hits"] += 1
+            if st["hits"] >= ONCOMING_HITS:
+                st["flag"] = meas
+                st["hits"] = 0
+        if lane_model is None:
+            return 0.0 if st["flag"] else _YAW_AWAY
+        return float(lane_model.heading_yaw_deg(y, oncoming=st["flag"]))
 
     # ------------------------------------------------------------- geometry
     @staticmethod
@@ -465,10 +497,11 @@ class BevQuick3DWidget(QQuickWidget):
                 live.add(tid)
         self._tid_slot = {tid: slot for tid, slot in self._tid_slot.items() if tid in live}
         self._lane_assign.drop(live)
+        self._oncoming = {t: s for t, s in self._oncoming.items() if t in live}
 
         cipo = self._pick_cipo(visible)
         cipo_tid = int(cipo.get("track_id", -999)) if cipo is not None else None
-        lane_model = LaneModel.from_lane_frame(self.lane_frame, n_left=2, n_right=2)
+        lane_model = LaneModel.from_lane_frame(self.lane_frame, n_left=1, n_right=1)
         ordered = sorted(
             visible,
             key=lambda o: (
@@ -477,6 +510,7 @@ class BevQuick3DWidget(QQuickWidget):
                 float(o.get("Z_3d", 99.0)),
             ),
         )
+        pending = []
         for obj in ordered:
             tid = int(obj.get("track_id", -1))
             if tid <= 0:
@@ -486,18 +520,33 @@ class BevQuick3DWidget(QQuickWidget):
                 continue
 
             x_cam = float(obj.get("X_3d", 0.0))
-            lane_slot, _off = self._lane_assign.update(tid, x_cam, z, lane_model)
+            if "lane_index" in obj:
+                raw_idx = int(obj.get("lane_index", 0))
+                lane_slot, _off = self._lane_assign.update_index(tid, raw_idx, 0.0)
+            else:
+                lane_slot, _off = self._lane_assign.update(tid, x_cam, z, lane_model)
             if lane_slot is None:
                 lane_slot = self._measured_lane_slot(obj)
-            x, y = place_in_lane(x_cam, z, lane_model, lane_slot, snap_strength=0.0)
             if abs(int(lane_slot or 0)) > TRAFFIC_LANE_MAX:
                 continue
+            pending.append((obj, tid, int(lane_slot), z))
+
+        pending = self._spread_same_lane(pending)
+
+        for obj, tid, lane_slot, z in pending:
+            x, y = place_in_lane(
+                0.0, z, lane_model, int(lane_slot),
+                snap_strength=1.0, offset_clamp_m=0.0,
+            )
+            if lane_model is None:
+                x, y = float(lane_slot) * self._lane_width_m(), z
 
             bound = self._alloc_slot(tid, self._prefer_kind(obj))
             if bound is None:
                 continue
             kind, mesh_slot = bound
             asset = KIND_ASSETS[kind]
+            yaw = self._heading_yaw(obj, y, lane_model)
             rows.append({
                 "tid": tid,
                 "kind": kind,
@@ -506,9 +555,52 @@ class BevQuick3DWidget(QQuickWidget):
                 "posX": round(float(x), 2),
                 "posY": round(float(asset.y), 2),
                 "posZ": round(-float(y), 2),
-                "yawDeg": 180.0,
+                "x0": float(x),
+                "y0": float(y),
+                "vx": float(obj.get("vx", 0.0)),
+                "vy": float(obj.get("vy", 0.0)),
+                "yawDeg": round(float(yaw), 1),
             })
         return rows
+
+    @staticmethod
+    def _spread_same_lane(pending):
+        """Keep two cars in one lane from stacking: nearer stays, farther slides back."""
+        if len(pending) < 2:
+            return pending
+        by_lane = {}
+        for item in pending:
+            by_lane.setdefault(item[2], []).append(item)
+        out = []
+        for _lane, items in by_lane.items():
+            items.sort(key=lambda t: t[3])
+            last_z = None
+            for obj, tid, lane_slot, z in items:
+                if last_z is not None and z < last_z + SAME_LANE_GAP_M:
+                    z = last_z + SAME_LANE_GAP_M
+                last_z = z
+                out.append((obj, tid, lane_slot, z))
+        return out
+
+    def _on_extrap_tick(self):
+        seed = self._traffic_seed
+        if not seed or self._traffic_t0 <= 0.0:
+            return
+        dt = min(MAX_EXTRAPOLATE_S, time.perf_counter() - self._traffic_t0)
+        if dt < 0.012:
+            return
+        live = []
+        for r in seed:
+            x = float(r["x0"]) + float(r.get("vx", 0.0)) * dt
+            y = float(r["y0"]) + float(r.get("vy", 0.0)) * dt
+            out = dict(r)
+            out["posX"] = round(x, 2)
+            out["posZ"] = round(-y, 2)
+            live.append(out)
+        payload = json.dumps(live, separators=(",", ":"))
+        if payload != self._last_traffic_json:
+            self._last_traffic_json = payload
+            self._set("trafficJson", payload)
 
     def _traffic_x(self, x, z):
         if not self.lane_frame.valid:
@@ -522,7 +614,7 @@ class BevQuick3DWidget(QQuickWidget):
         marked = [o for o in vis if o.get("is_cipo")]
         if marked:
             return min(marked, key=lambda o: float(o.get("Z_3d", 99.0)))
-        path = [o for o in vis if o.get("in_path")]
+        path = [o for o in vis if o.get("in_path") and int(o.get("lane_index", 0)) == 0]
         if path:
             return min(path, key=lambda o: float(o.get("Z_3d", 99.0)))
         return None
@@ -578,7 +670,10 @@ class BevQuick3DWidget(QQuickWidget):
         self._push_ego_pose()
         self._push_cipo(self.processed_objs, cipo_status)
 
-        payload = json.dumps(self._traffic_payload(self.processed_objs), separators=(",", ":"))
+        rows = self._traffic_payload(self.processed_objs)
+        self._traffic_seed = rows
+        self._traffic_t0 = time.perf_counter()
+        payload = json.dumps(rows, separators=(",", ":"))
         if payload != self._last_traffic_json:
             self._last_traffic_json = payload
             self._set("trafficJson", payload)
