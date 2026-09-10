@@ -32,12 +32,28 @@ def _hud_top(gray: np.ndarray) -> int:
     return int(min(rows))
 
 
+_MPH_TMPL_H = None
+
+
+def _mph_template_height() -> int:
+    """Native HUD row count. Scaling the MPH glyph to a taller hood-crop kills NCC."""
+    global _MPH_TMPL_H
+    if _MPH_TMPL_H is None:
+        img = cv2.imread(_MPH_TEMPLATE_PATH, cv2.IMREAD_GRAYSCALE) if os.path.isfile(_MPH_TEMPLATE_PATH) else None
+        _MPH_TMPL_H = int(img.shape[0]) if img is not None and img.size else 37
+    return int(_MPH_TMPL_H)
+
+
 def _hud_bar(gray: np.ndarray) -> np.ndarray:
     """Bottom Garmin overlay only — do not eat the dark hood as HUD."""
     h = gray.shape[0]
     y0 = _hud_top(gray)
     y0 = max(int(y0), h - 42)
-    return gray[y0:]
+    bar = gray[y0:]
+    th = _mph_template_height()
+    if bar.shape[0] > th:
+        bar = bar[-th:]
+    return bar
 
 
 def _load_digit_templates():
@@ -327,10 +343,15 @@ class EgoSpeedLog:
             return None
         return cls.from_json(path)
 
-    def get_mps(self, frame_index: int) -> Optional[float]:
+    def get_mps(self, frame_index: int, min_mps: float = 0.3) -> Optional[float]:
+        """Metres per second at this frame.
+
+        `min_mps=0` keeps a true stop as 0.0 (needed for world-frame heading).
+        The default 0.3 still treats a parked log as 'no speed' for dash scroll.
+        """
         if frame_index < 0 or frame_index >= len(self.mps):
             return None
         v = self.mps[frame_index]
-        if v is None or v < 0.3:
+        if v is None or v < float(min_mps):
             return None
         return float(v)

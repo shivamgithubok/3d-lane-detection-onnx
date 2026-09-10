@@ -84,7 +84,8 @@ TRAFFIC_DODGE = CarAsset(
     y=0.0,
 )
 
-TRUCK_LABELS = ("truck", "bus", "lorry", "van")
+# Exact YOLO/COCO names. Do not substring-match ("van" is not a class here).
+TRUCK_LABELS = ("truck", "bus", "lorry")
 
 KIND_ASSETS = {
     KIND_SKODA: TRAFFIC_SKODA,

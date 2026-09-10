@@ -18,11 +18,13 @@ Item {
     property real panY: 0.0
     property bool cinematicRoad: true
     property bool showLaneLines: true
+    property bool scenicView: true
     property bool showCalib: false
     // Metric debug overlay: ego centreline, 10 m ruler ticks, per-object (x, z)
     // labels in metres. Toggle from Python via _set("debugMetric", True).
     property bool debugMetric: false
-    property real debugMaxZ: 60.0
+    property real debugMaxZ: 70.0
+    property real diskRadiusM: 70.0
     // Parsed trafficJson rows, kept for the metric labels above. Populated by
     // applyTraffic so the labels can never disagree with what was drawn.
     property var debugRows: []
@@ -86,6 +88,7 @@ Item {
     // Lane-anchored render: the lane is pinned and the ego moves within it.
     property real egoX: 0
     property real egoYawDeg: 0
+    property real worldYawDeg: 0
     property bool laneValid: false
     property bool laneHeld: false
     property real targetCarLength: 4.6
@@ -104,6 +107,7 @@ Item {
     property string laneJson: "[]"
     property string dashJson: "[]"
     property string edgeJson: "[]"
+    property string trailJson: "[]"
 
     onTrafficJsonChanged: applyTraffic()
     onTeslaYChanged: applyTraffic()
@@ -114,8 +118,9 @@ Item {
     onLaneJsonChanged: applyLanes()
     onDashJsonChanged: applyDashes()
     onEdgeJsonChanged: applyEdges()
-    onShowLaneLinesChanged: { applyLanes(); applyDashes(); applyEdges() }
-    onCinematicRoadChanged: { applyLanes(); applyDashes(); applyEdges() }
+    onTrailJsonChanged: applyTrail()
+    onShowLaneLinesChanged: { applyLanes(); applyDashes(); applyEdges(); applyTrail() }
+    onCinematicRoadChanged: { applyLanes(); applyDashes(); applyEdges(); applyTrail() }
     onEnvModeChanged: refreshEnv()
     onClockHourChanged: refreshEnv()
 
@@ -126,6 +131,7 @@ Item {
         applyLanes()
         applyDashes()
         applyEdges()
+        applyTrail()
     }
 
     function syncClockHour() {
@@ -339,12 +345,19 @@ Item {
         id: skyBackdrop
         anchors.fill: parent
         z: 0
+        visible: root.scenicView
         gradient: Gradient {
             GradientStop { position: 0.0; color: root.skyTopColor }
             GradientStop { position: 0.38; color: root.skyMidColor }
             GradientStop { position: 0.72; color: root.skyBotColor }
             GradientStop { position: 1.0; color: root.mistCol }
         }
+    }
+    Rectangle {
+        anchors.fill: parent
+        z: 0
+        visible: !root.scenicView
+        color: "#141414"
     }
 
     Item {
@@ -354,7 +367,7 @@ Item {
         y: root.sunScreenY
         width: root.sunDiscSize * 2.6
         height: width
-        visible: true
+        visible: root.scenicView
 
         Rectangle {
             anchors.centerIn: parent
@@ -389,7 +402,8 @@ Item {
         z: 1
         y: parent.height * 0.26
         height: parent.height * 0.22
-        opacity: root.cinematicRoad ? 1.0 : 0.0
+        opacity: (root.scenicView && root.cinematicRoad) ? 1.0 : 0.0
+        visible: root.scenicView
 
         // Far range — lighter, softer, sits behind near peaks
         Shape {
@@ -490,6 +504,10 @@ Item {
         // static ±5.35 fallback: it used to pop in on every detection miss and
         // cross the real edge on curves.
         applySegPool(edgeRep, root.cinematicRoad ? root.edgeJson : "[]", 0.028)
+    }
+
+    function applyTrail() {
+        applySegPool(trailRep, "[]", 0.02)
     }
 
     function applyTraffic() {
@@ -700,45 +718,58 @@ Item {
             ambientColor: root.ambientCol
         }
 
-        // Ground: cinematic asphalt vs telemetry grid
-        Model {
-            source: "#Rectangle"
-            eulerRotation.x: -90
-            scale: Qt.vector3d(root.cinematicRoad ? 0.112 : 0.80, root.cinematicRoad ? 0.85 : 1.60, 1)
-            position: Qt.vector3d(0, 0, root.cinematicRoad ? -40 : 0)
-            materials: PrincipledMaterial {
-                baseColor: root.cinematicRoad ? root.asphaltCol : "#222a35"
-                roughness: 0.95
-                metalness: 0.0
-            }
-        }
+        // Heading-up 70 m disk. worldYawDeg is a short opposite flash during a
+        // turn, then settles to 0 — never accumulated odometry.
+        Node {
+            id: worldRig
+            eulerRotation: Qt.vector3d(0, root.worldYawDeg, 0)
 
-        // Shoulder beyond cinematic asphalt
-        Model {
-            visible: root.cinematicRoad
-            source: "#Rectangle"
-            eulerRotation.x: -90
-            scale: Qt.vector3d(0.32, 0.90, 1)
-            position: Qt.vector3d(0, -0.01, -42)
-            materials: PrincipledMaterial {
-                baseColor: root.shoulderCol
-                roughness: 1.0
+            Model {
+                visible: root.scenicView && root.cinematicRoad
+                source: "#Cylinder"
+                scale: Qt.vector3d((root.diskRadiusM + 8.0) / 50.0, 0.0001, (root.diskRadiusM + 8.0) / 50.0)
+                position: Qt.vector3d(0, -0.02, 0)
+                materials: PrincipledMaterial {
+                    baseColor: root.shoulderCol
+                    roughness: 1.0
+                }
             }
-        }
-
-        // Far ground fade into the mountain base (no bright slab)
-        Model {
-            visible: root.cinematicRoad
-            source: "#Rectangle"
-            eulerRotation.x: -90
-            scale: Qt.vector3d(0.48, 0.40, 1)
-            position: Qt.vector3d(0, -0.02, -72)
-            materials: PrincipledMaterial {
-                lighting: PrincipledMaterial.NoLighting
-                baseColor: root.mountainNearCol
-                roughness: 1.0
+            Model {
+                // Qt #Cylinder default radius is 50; scale.xz = metres / 50.
+                source: "#Cylinder"
+                scale: Qt.vector3d(root.diskRadiusM / 50.0, 0.00012, root.diskRadiusM / 50.0)
+                position: Qt.vector3d(0, 0, 0)
+                materials: PrincipledMaterial {
+                    baseColor: root.scenicView
+                                 ? (root.cinematicRoad ? root.asphaltCol : "#222a35")
+                                 : "#6a6a6e"
+                    roughness: 0.95
+                    metalness: 0.0
+                }
             }
-        }
+            Repeater3D {
+                model: 168
+                Model {
+                    source: "#Cube"
+                    position: {
+                        const ringIdx = Math.floor(index / 56)
+                        const step = index % 56
+                        const ringR = ringIdx === 0 ? 20 : (ringIdx === 1 ? 40 : root.diskRadiusM)
+                        return Qt.vector3d(
+                            Math.cos(step * 2.0 * Math.PI / 56.0) * ringR,
+                            0.05,
+                            -Math.sin(step * 2.0 * Math.PI / 56.0) * ringR)
+                    }
+                    scale: Qt.vector3d(0.09, 0.00012, 0.0016)
+                    eulerRotation.y: -((index % 56) * (360.0 / 56.0))
+                    materials: PrincipledMaterial {
+                        lighting: PrincipledMaterial.NoLighting
+                        baseColor: Math.floor(index / 56) === 2 ? "#6a7380" : "#3d4654"
+                        opacity: 0.55
+                        alphaMode: PrincipledMaterial.Blend
+                    }
+                }
+            }
 
         Repeater3D {
             id: edgeRep
@@ -767,28 +798,17 @@ Item {
         }
 
         Repeater3D {
-            model: 17
-            visible: !root.cinematicRoad
+            id: trailRep
+            model: 32
             Model {
+                property int pal: 0
+                visible: false
                 source: "#Cube"
-                position: Qt.vector3d((index - 8) * 5.0, 0.01, -40)
-                scale: Qt.vector3d(0.00012, 0.00008, 1.20)
                 materials: PrincipledMaterial {
-                    baseColor: "#2a3340"
-                    roughness: 1
-                }
-            }
-        }
-        Repeater3D {
-            model: 17
-            visible: !root.cinematicRoad
-            Model {
-                source: "#Cube"
-                position: Qt.vector3d(0, 0.01, -index * 5.0)
-                scale: Qt.vector3d(0.80, 0.00008, 0.00012)
-                materials: PrincipledMaterial {
-                    baseColor: "#2a3340"
-                    roughness: 1
+                    lighting: PrincipledMaterial.NoLighting
+                    baseColor: pal === 1 ? "#8aa4c8" : "#6e889e"
+                    opacity: 0.55
+                    alphaMode: PrincipledMaterial.Blend
                 }
             }
         }
@@ -890,38 +910,6 @@ Item {
                     baseColor: root.cipoGlow
                 }
             }
-        }
-
-        // Placeholder cube if the GLB is missing or failed
-        Model {
-            visible: root.egoGltf.toString() === "" || egoCar.status === RuntimeLoader.Error
-            source: "#Cube"
-            position: Qt.vector3d(root.egoX, 0.65, 0)
-            eulerRotation: Qt.vector3d(0, root.egoYawDeg, 0)
-            scale: Qt.vector3d(0.018, 0.013, 0.043)
-            materials: PrincipledMaterial {
-                baseColor: "#00c8ff"
-                roughness: 0.35
-                metalness: 0.15
-            }
-        }
-
-        // Model.source only loads Qt .mesh (balsam). GLB must use RuntimeLoader.
-        RuntimeLoader {
-            id: egoCar
-            source: root.egoGltf
-            visible: root.egoGltf.toString() !== "" && status !== RuntimeLoader.Error
-            position: Qt.vector3d(root.egoX, root.egoY, 0)
-            scale: Qt.vector3d(root.egoScale, root.egoScale, root.egoScale)
-            eulerRotation: Qt.vector3d(root.egoRotX, root.egoRotY + root.egoYawDeg, root.egoRotZ)
-        }
-
-        Timer {
-            id: egoFitTimer
-            interval: 33
-            repeat: true
-            running: egoCar.status === RuntimeLoader.Success && !root.egoFitted
-            onTriggered: root.fitEgoFromBounds()
         }
 
         // Pooled traffic: one RuntimeLoader per slot, source set once.
@@ -1065,6 +1053,36 @@ Item {
             running: dodgeLoader.status === RuntimeLoader.Success && !root.dodgeFitted
             onTriggered: root.fitDodgeFromBounds()
         }
+        } // worldRig — live world flashes opposite the ego, then settles
+
+        // Ego stays heading-up except for the brief turn yaw on this GLB.
+        Model {
+            visible: root.egoGltf.toString() === "" || egoCar.status === RuntimeLoader.Error
+            source: "#Cube"
+            position: Qt.vector3d(root.egoX, 0.65, 0)
+            eulerRotation: Qt.vector3d(0, root.egoYawDeg, 0)
+            scale: Qt.vector3d(0.018, 0.013, 0.043)
+            materials: PrincipledMaterial {
+                baseColor: "#00c8ff"
+                roughness: 0.35
+                metalness: 0.15
+            }
+        }
+        RuntimeLoader {
+            id: egoCar
+            source: root.egoGltf
+            visible: root.egoGltf.toString() !== "" && status !== RuntimeLoader.Error
+            position: Qt.vector3d(root.egoX, root.egoY, 0)
+            scale: Qt.vector3d(root.egoScale, root.egoScale, root.egoScale)
+            eulerRotation: Qt.vector3d(root.egoRotX, root.egoRotY + root.egoYawDeg, root.egoRotZ)
+        }
+        Timer {
+            id: egoFitTimer
+            interval: 33
+            repeat: true
+            running: egoCar.status === RuntimeLoader.Success && !root.egoFitted
+            onTriggered: root.fitEgoFromBounds()
+        }
     }
 
     MouseArea {
@@ -1203,6 +1221,7 @@ Item {
             Repeater {
                 model: [
                     { key: "reset", label: "Reset" },
+                    { key: "scenic", label: root.scenicView ? "Scene" : "Road" },
                     { key: "road", label: root.cinematicRoad ? "Film" : "Grid" },
                     { key: "lanes", label: root.showLaneLines ? "Lanes" : "No lanes" },
                     { key: "env", label: root.envLabel },
@@ -1235,6 +1254,8 @@ Item {
                                 root.panY = 0
                                 root.calibPitch = -7
                                 root.calibH = 1
+                            } else if (key === "scenic") {
+                                root.scenicView = !root.scenicView
                             } else if (key === "road") {
                                 root.cinematicRoad = !root.cinematicRoad
                             } else if (key === "env") {

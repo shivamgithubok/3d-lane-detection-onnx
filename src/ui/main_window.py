@@ -179,8 +179,15 @@ class ADASMainWindow(QMainWindow):
 
         self.btn_road_style = None
         self.btn_lane_lines = None
+        self.btn_scenic = None
         # Always show extrinsics (P2) — drives front P_matrix + BEV camera
         bev_ctrl_layout = QHBoxLayout()
+        if isinstance(self.bev_widget, BevQuick3DWidget):
+            self.btn_scenic = QPushButton("View: Scene")
+            self.btn_scenic.setObjectName("ctrl_btn")
+            self.btn_scenic.setToolTip("Scene: sky, grass, mountains. Road: one-color pavement only.")
+            self.btn_scenic.clicked.connect(self.toggle_scenic_view)
+            bev_ctrl_layout.addWidget(self.btn_scenic)
         if not isinstance(self.bev_widget, BevQuick3DWidget):
             btn_reset_bev = QPushButton("Reset BEV")
             btn_reset_bev.setObjectName("ctrl_btn")
@@ -273,6 +280,11 @@ class ADASMainWindow(QMainWindow):
         if self.btn_lane_lines is not None:
             self.btn_lane_lines.setChecked(show)
             self.btn_lane_lines.setText("Lanes: ON" if show else "Lanes: OFF")
+
+    def toggle_scenic_view(self):
+        scenic = self.bev_widget.toggle_scenic_view()
+        if self.btn_scenic is not None:
+            self.btn_scenic.setText("View: Scene" if scenic else "View: Road")
 
     def open_video_file(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "Open MP4 Video File", "", "Video Files (*.mp4 *.avi *.mkv)")

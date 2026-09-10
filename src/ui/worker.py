@@ -236,7 +236,10 @@ class InferenceWorker(QThread):
                     raw_proposals, scores = postprocess_onnx_output(
                         h_reg_proposals, conf_threshold=prep_meta["conf"]
                     )
-                    speed_mps = speed_log.get_mps(frame_i) if speed_log is not None else None
+                    speed_mps = (
+                        speed_log.get_mps(frame_i, min_mps=0.0)
+                        if speed_log is not None else None
+                    )
                     road_state = road_state_estimator.update(
                         raw_proposals, dt=source_dt, speed_mps=speed_mps
                     )

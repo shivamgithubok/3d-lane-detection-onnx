@@ -53,6 +53,10 @@ DELETE_FRAMES = 20
 # Physical clamps. Closing faster than this is a detection error, not a car.
 VY_MIN, VY_MAX = -45.0, 25.0
 VX_MIN, VX_MAX = -8.0, 8.0
+# Twin YOLO boxes that still got two ByteTrack IDs: same vehicle in BEV.
+DEDUP_X_M = 1.8
+DEDUP_Y_M = 3.2
+DEDUP_BOX_IOU = 0.40
 # ByteTrack id reuse (new car, old id). Not a χ² reject of the same car.
 REINIT_Y_M = 18.0
 REINIT_X_M = 3.0
@@ -349,7 +353,49 @@ class BevTracker:
             if id(tr) not in matched_tracks:
                 tr.mark_missed()
         self.tracks = {t: tr for t, tr in self.tracks.items() if tr.alive}
+        self._drop_bev_twins()
         return [tr for tr in self.tracks.values() if tr.renderable]
+
+    def _drop_bev_twins(self) -> None:
+        """Keep one track when two IDs sit on the same vehicle."""
+        live = [tr for tr in self.tracks.values() if tr.alive]
+        if len(live) < 2:
+            return
+        live.sort(key=lambda t: (-int(t.hits), -int(t.age), int(t.track_id)))
+        drop = set()
+        for i, a in enumerate(live):
+            if a.track_id in drop:
+                continue
+            for b in live[i + 1 :]:
+                if b.track_id in drop:
+                    continue
+                near = (
+                    abs(float(a.x[0]) - float(b.x[0])) < DEDUP_X_M
+                    and abs(float(a.x[1]) - float(b.x[1])) < DEDUP_Y_M
+                )
+                overlap = (
+                    a.bbox is not None
+                    and b.bbox is not None
+                    and self._bbox_iou(a.bbox, b.bbox) >= DEDUP_BOX_IOU
+                )
+                if near or overlap:
+                    drop.add(b.track_id)
+        if drop:
+            self.tracks = {t: tr for t, tr in self.tracks.items() if t not in drop}
+
+    @staticmethod
+    def _bbox_iou(a, b) -> float:
+        ax1, ay1, ax2, ay2 = [float(v) for v in a[:4]]
+        bx1, by1, bx2, by2 = [float(v) for v in b[:4]]
+        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+        if inter <= 0.0:
+            return 0.0
+        aa = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+        ba = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+        denom = aa + ba - inter
+        return float(inter / denom) if denom > 0 else 0.0
 
     @staticmethod
     def _stamp(tr: BevTrack, m: dict) -> None:
