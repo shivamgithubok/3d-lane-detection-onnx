@@ -183,7 +183,7 @@ class ADASMainWindow(QMainWindow):
         # Always show extrinsics (P2) — drives front P_matrix + BEV camera
         bev_ctrl_layout = QHBoxLayout()
         if isinstance(self.bev_widget, BevQuick3DWidget):
-            self.btn_scenic = QPushButton("View: Scene")
+            self.btn_scenic = QPushButton("View: Road")
             self.btn_scenic.setObjectName("ctrl_btn")
             self.btn_scenic.setToolTip("Scene: sky, grass, mountains. Road: one-color pavement only.")
             self.btn_scenic.clicked.connect(self.toggle_scenic_view)

@@ -6,19 +6,19 @@ import QtQuick3D.AssetUtils
 Item {
     id: root
 
-    // Camera — same defaults as BEVWidget (chase cam)
-    property real pitchDeg: 31.0
+    // Camera — 3rd-person chase, cluster-style (low, behind ego, looking down the road)
+    property real pitchDeg: 13.0
     property real yawDeg: 0.0
-    property real zoomFactor: 1.05
-    property real camH: 10.0
-    property real camDist: 12.0
-    property real calibPitch: -7.0
+    property real zoomFactor: 1.08
+    property real camH: 5.0
+    property real camDist: 10.5
+    property real calibPitch: 0.0
     property real calibH: 1.0
     property real panX: 0.0
     property real panY: 0.0
     property bool cinematicRoad: true
     property bool showLaneLines: true
-    property bool scenicView: true
+    property bool scenicView: false
     property bool showCalib: false
     // Metric debug overlay: ego centreline, 10 m ruler ticks, per-object (x, z)
     // labels in metres. Toggle from Python via _set("debugMetric", True).
@@ -61,9 +61,9 @@ Item {
     property real cipoDist: 0
     readonly property color cipoGlow: cipoStatus === "DANGER" ? "#e23a3c"
                                      : (cipoStatus === "WARNING" ? "#e09a20" : "#3ec8ff")
-    readonly property color corridorColor: cipoStatus === "DANGER" ? Qt.rgba(0.95, 0.18, 0.32, 0.42)
-                                     : (cipoStatus === "WARNING" ? Qt.rgba(1.0, 0.62, 0.08, 0.40)
-                                                                 : Qt.rgba(0.25, 0.78, 1.0, 0.40))
+    readonly property color corridorColor: cipoStatus === "DANGER" ? Qt.rgba(0.95, 0.18, 0.32, 0.80)
+                                     : (cipoStatus === "WARNING" ? Qt.rgba(1.0, 0.72, 0.08, 0.78)
+                                                                 : Qt.rgba(0.76, 0.93, 0.14, 0.82))
     property string overlayHint: "Phase 2 — loading GLB"
     property url egoGltf: ""
     property url skodaGltf: ""
@@ -114,7 +114,7 @@ Item {
     onSkodaYChanged: applyTraffic()
     onShcYChanged: applyTraffic()
     onDodgeYChanged: applyTraffic()
-    onCorridorJsonChanged: applySegPool(corrRep, root.corridorJson, 0.035)
+    onCorridorJsonChanged: applySegPool(corrRep, root.corridorJson, 0.045)
     onLaneJsonChanged: applyLanes()
     onDashJsonChanged: applyDashes()
     onEdgeJsonChanged: applyEdges()
@@ -127,7 +127,7 @@ Item {
     Component.onCompleted: {
         syncClockHour()
         refreshEnv()
-        applySegPool(corrRep, root.corridorJson, 0.035)
+        applySegPool(corrRep, root.corridorJson, 0.045)
         applyLanes()
         applyDashes()
         applyEdges()
@@ -340,58 +340,24 @@ Item {
         return Math.max(6, Math.min(height * 0.36, y))
     }
 
-    // 2D sky + sun + mountain silhouettes sit behind the transparent View3D.
+    // Cluster void — no sky/sun/buildings. Matches the OEM dashboards.
     Rectangle {
         id: skyBackdrop
         anchors.fill: parent
         z: 0
-        visible: root.scenicView
         gradient: Gradient {
-            GradientStop { position: 0.0; color: root.skyTopColor }
-            GradientStop { position: 0.38; color: root.skyMidColor }
-            GradientStop { position: 0.72; color: root.skyBotColor }
-            GradientStop { position: 1.0; color: root.mistCol }
+            GradientStop { position: 0.0; color: "#070b12" }
+            GradientStop { position: 0.42; color: "#0c141e" }
+            GradientStop { position: 1.0; color: "#101820" }
         }
-    }
-    Rectangle {
-        anchors.fill: parent
-        z: 0
-        visible: !root.scenicView
-        color: "#141414"
     }
 
     Item {
         id: sunGlow
         z: 1
-        x: root.sunScreenX
-        y: root.sunScreenY
-        width: root.sunDiscSize * 2.6
-        height: width
-        visible: root.scenicView
-
-        Rectangle {
-            anchors.centerIn: parent
-            width: parent.width
-            height: parent.height
-            radius: width / 2
-            color: Qt.rgba(root.sunColor.r, root.sunColor.g, root.sunColor.b, 0.18)
-        }
-        Rectangle {
-            anchors.centerIn: parent
-            width: root.sunDiscSize * 1.55
-            height: width
-            radius: width / 2
-            color: Qt.rgba(root.sunColor.r, root.sunColor.g, root.sunColor.b, 0.40)
-        }
-        Rectangle {
-            anchors.centerIn: parent
-            width: root.sunDiscSize
-            height: width
-            radius: width / 2
-            color: root.sunIsMoon ? "#e8eef8" : root.sunColor
-            border.width: root.sunIsMoon ? 1 : 0
-            border.color: "#a0b4d0"
-        }
+        visible: false
+        width: 1
+        height: 1
     }
 
     // Distant mountain ranges along the horizon (replaces the fake mist slab).
@@ -402,8 +368,8 @@ Item {
         z: 1
         y: parent.height * 0.26
         height: parent.height * 0.22
-        opacity: (root.scenicView && root.cinematicRoad) ? 1.0 : 0.0
-        visible: root.scenicView
+        opacity: 0.0
+        visible: false
 
         // Far range — lighter, softer, sits behind near peaks
         Shape {
@@ -704,68 +670,74 @@ Item {
                 Math.cos(root.yawRad) * root.camZ
             )
             eulerRotation: Qt.vector3d(root.lookPitch, root.yawDeg, 0)
-            fieldOfView: 50
+            fieldOfView: 44
             clipNear: 0.3
-            clipFar: 250
+            clipFar: 180
         }
 
         DirectionalLight {
-            eulerRotation.x: -(22.0 + root.sunElev * 52.0)
-            eulerRotation.y: root.sunAzim
-            brightness: root.lightBright
-            color: root.lightCol
+            eulerRotation.x: -32
+            eulerRotation.y: 22
+            brightness: 0.92
+            color: "#d4e2f0"
             castsShadow: false
-            ambientColor: root.ambientCol
+            ambientColor: "#243040"
         }
 
-        // Heading-up 70 m disk. worldYawDeg is a short opposite flash during a
-        // turn, then settles to 0 — never accumulated odometry.
+        // 3rd-person cluster road: long vanishing-point strip, ego-lane only.
         Node {
             id: worldRig
             eulerRotation: Qt.vector3d(0, root.worldYawDeg, 0)
 
+            // Dark void under the road so the sides fall off into the cluster.
             Model {
-                visible: root.scenicView && root.cinematicRoad
-                source: "#Cylinder"
-                scale: Qt.vector3d((root.diskRadiusM + 8.0) / 50.0, 0.0001, (root.diskRadiusM + 8.0) / 50.0)
-                position: Qt.vector3d(0, -0.02, 0)
+                source: "#Rectangle"
+                eulerRotation.x: -90
+                scale: Qt.vector3d(0.80, 1.20, 1)
+                position: Qt.vector3d(0, -0.04, -40)
                 materials: PrincipledMaterial {
-                    baseColor: root.shoulderCol
+                    lighting: PrincipledMaterial.NoLighting
+                    baseColor: "#0a1018"
                     roughness: 1.0
                 }
             }
+            // Pavement going to the horizon (about 12 m wide × 90 m long).
             Model {
-                // Qt #Cylinder default radius is 50; scale.xz = metres / 50.
-                source: "#Cylinder"
-                scale: Qt.vector3d(root.diskRadiusM / 50.0, 0.00012, root.diskRadiusM / 50.0)
-                position: Qt.vector3d(0, 0, 0)
+                source: "#Rectangle"
+                eulerRotation.x: -90
+                scale: Qt.vector3d(0.12, 0.90, 1)
+                position: Qt.vector3d(0, 0, -40)
                 materials: PrincipledMaterial {
-                    baseColor: root.scenicView
-                                 ? (root.cinematicRoad ? root.asphaltCol : "#222a35")
-                                 : "#6a6a6e"
-                    roughness: 0.95
+                    baseColor: "#1a2433"
+                    roughness: 0.97
                     metalness: 0.0
                 }
             }
+            // BMW-style perspective grid on the pavement.
             Repeater3D {
-                model: 168
+                model: 16
                 Model {
                     source: "#Cube"
-                    position: {
-                        const ringIdx = Math.floor(index / 56)
-                        const step = index % 56
-                        const ringR = ringIdx === 0 ? 20 : (ringIdx === 1 ? 40 : root.diskRadiusM)
-                        return Qt.vector3d(
-                            Math.cos(step * 2.0 * Math.PI / 56.0) * ringR,
-                            0.05,
-                            -Math.sin(step * 2.0 * Math.PI / 56.0) * ringR)
-                    }
-                    scale: Qt.vector3d(0.09, 0.00012, 0.0016)
-                    eulerRotation.y: -((index % 56) * (360.0 / 56.0))
+                    position: Qt.vector3d(0, 0.02, 6.0 - index * 6.0)
+                    scale: Qt.vector3d(0.12, 0.00008, 0.00018)
                     materials: PrincipledMaterial {
                         lighting: PrincipledMaterial.NoLighting
-                        baseColor: Math.floor(index / 56) === 2 ? "#6a7380" : "#3d4654"
-                        opacity: 0.55
+                        baseColor: "#2a4a62"
+                        opacity: 0.28
+                        alphaMode: PrincipledMaterial.Blend
+                    }
+                }
+            }
+            Repeater3D {
+                model: 7
+                Model {
+                    source: "#Cube"
+                    position: Qt.vector3d((index - 3) * 2.0, 0.02, -38)
+                    scale: Qt.vector3d(0.00016, 0.00008, 0.90)
+                    materials: PrincipledMaterial {
+                        lighting: PrincipledMaterial.NoLighting
+                        baseColor: "#2a4a62"
+                        opacity: 0.22
                         alphaMode: PrincipledMaterial.Blend
                     }
                 }
@@ -792,7 +764,7 @@ Item {
                 source: "#Cube"
                 materials: PrincipledMaterial {
                     lighting: PrincipledMaterial.NoLighting
-                    baseColor: "#e8eef8"
+                    baseColor: "#c5d0dc"
                 }
             }
         }
@@ -848,14 +820,14 @@ Item {
 
         Repeater3D {
             id: corrRep
-            model: 14
+            model: 18
             Model {
                 visible: false
                 source: "#Cube"
                 materials: PrincipledMaterial {
                     lighting: PrincipledMaterial.NoLighting
                     baseColor: root.corridorColor
-                    opacity: 0.45
+                    opacity: 0.78
                     alphaMode: PrincipledMaterial.Blend
                 }
             }
@@ -876,7 +848,7 @@ Item {
 
         Model {
             id: cipoRing
-            visible: root.cipoVisible
+            visible: false
             source: "#Cylinder"
             position: Qt.vector3d(root.cipoX, 0.06, root.cipoZ)
             scale: Qt.vector3d(0.034, 0.0004, 0.034)
@@ -889,7 +861,7 @@ Item {
         }
         Model {
             id: cipoBeacon
-            visible: root.cipoVisible
+            visible: false
             source: "#Cylinder"
             position: Qt.vector3d(root.cipoX, 1.35, root.cipoZ)
             scale: Qt.vector3d(0.0014, 0.026, 0.0014)
@@ -899,8 +871,7 @@ Item {
             }
         }
         Node {
-            visible: root.cipoVisible
-            position: Qt.vector3d(root.cipoX, 2.55, root.cipoZ)
+            visible: false
             eulerRotation: Qt.vector3d(root.lookPitch, root.yawDeg, 0)
             Model {
                 source: "#Rectangle"
@@ -1247,12 +1218,12 @@ Item {
                         onClicked: {
                             const key = parent.modelData.key
                             if (key === "reset") {
-                                root.pitchDeg = 31
+                                root.pitchDeg = 13
                                 root.yawDeg = 0
-                                root.zoomFactor = 1.05
+                                root.zoomFactor = 1.08
                                 root.panX = 0
                                 root.panY = 0
-                                root.calibPitch = -7
+                                root.calibPitch = 0
                                 root.calibH = 1
                             } else if (key === "scenic") {
                                 root.scenicView = !root.scenicView

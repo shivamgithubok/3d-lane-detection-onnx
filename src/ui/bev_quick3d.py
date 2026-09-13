@@ -50,10 +50,10 @@ BEV_MAX_LATERAL_M = 14.0
 TURN_YAW_MAX_DEG = 14.0
 TURN_YAW_GAIN = 0.45
 TURN_YAW_ALPHA = 0.22
-DEFAULT_VIEW_PITCH = 31.0
+DEFAULT_VIEW_PITCH = 13.0
 DEFAULT_VIEW_YAW = 0.0
-DEFAULT_ZOOM = 1.05
-DEFAULT_CALIB_PITCH = -7.0
+DEFAULT_ZOOM = 1.08
+DEFAULT_CALIB_PITCH = 0.0
 DEFAULT_CALIB_H = 1.0
 
 # Layer A: ego body keep-out (half sedan length ~2.3 m + bumper margin).
@@ -67,8 +67,10 @@ SAME_LANE_GAP_M = 8.0         # min range gap for two cars in the same lane
 
 # Uniform sampling of every lane-frame polyline. Constant across frames.
 POLY_SAMPLES = 48
-CORRIDOR_SEGS = 12
+CORRIDOR_SEGS = 16
 BOUNDARY_SEGS = 12
+CORRIDOR_START_M = 5.0   # start ahead of the ego body, not under the car
+CORRIDOR_DRAW_M = 30.0   # practical cluster lookahead
 
 # Lane-slot presence hysteresis: how a neighbouring marking fades in/out.
 SLOT_MATCH_M = 0.90
@@ -329,7 +331,8 @@ class BevQuick3DWidget(QQuickWidget):
 
     # ------------------------------------------------------------- geometry
     @staticmethod
-    def _poly_segments(ys, xs, width, pal=None, max_segs=BOUNDARY_SEGS, radius=BEV_DISK_R_M):
+    def _poly_segments(ys, xs, width, pal=None, max_segs=BOUNDARY_SEGS, radius=BEV_DISK_R_M,
+                       y_min=0.0):
         """Segment rows from a uniformly sampled lane-frame polyline.
 
         ys/xs have a fixed length, so the emitted segment count is identical
@@ -344,7 +347,7 @@ class BevQuick3DWidget(QQuickWidget):
         ys, xs = ys[:n], xs[:n]
         if radius is not None:
             r2 = float(radius) * float(radius)
-            keep = (ys >= 0.0) & ((xs * xs + ys * ys) <= r2)
+            keep = (ys >= float(y_min)) & ((xs * xs + ys * ys) <= r2)
             if int(np.sum(keep)) < 2:
                 return []
             ys, xs = ys[keep], xs[keep]
@@ -422,12 +425,16 @@ class BevQuick3DWidget(QQuickWidget):
 
     # -------------------------------------------------------------- payloads
     def _corridor_payload(self):
+        """Ego-lane path ahead of the bumper — not a pad under the car."""
         if not self.lane_frame.valid:
             return []
-        ys, cx = self.lane_frame.centerline(BEV_MAX_DIST_M, POLY_SAMPLES)
-        w = max(0.8, self.lane_frame.lane_width)
-        rows = self._poly_segments(ys, cx, w, max_segs=CORRIDOR_SEGS)
-        return rows[:14]
+        ys = np.linspace(CORRIDOR_START_M, CORRIDOR_DRAW_M, POLY_SAMPLES)
+        xs = self.lane_frame.lane_x(ys)
+        w = float(np.clip(self.lane_frame.lane_width * 0.94, 2.6, 3.6))
+        rows = self._poly_segments(
+            ys, xs, w, max_segs=CORRIDOR_SEGS, y_min=CORRIDOR_START_M,
+        )
+        return rows[:18]
 
     def _dash_payload(self):
         """White ego-lane dashes that scroll backwards with integrated odometry."""
@@ -441,46 +448,18 @@ class BevQuick3DWidget(QQuickWidget):
             ys = np.linspace(span_y0, span_y1, 3)
             cx = self.lane_frame.lane_x(ys)
             for sign in (-1.0, 1.0):
-                rows.extend(self._poly_segments(ys, cx + sign * half_w, 0.18, max_segs=1))
+                rows.extend(self._poly_segments(ys, cx + sign * half_w, 0.14, max_segs=1))
             if len(rows) >= 28:
                 break
         return rows[:28]
 
     def _edge_payload(self, slots, offsets):
-        """Outer road edges from the outermost *stable* boundary on each side."""
-        if not self.lane_frame.valid or not slots:
-            return []
-        left = [k for k in slots if k < 0]
-        right = [k for k in slots if k > 0]
-        rows = []
-        for group, pick in ((left, min), (right, max)):
-            if not group:
-                continue
-            k = pick(group)
-            if abs(k) < 2:  # the ego pair is drawn as dashes, not a road edge
-                continue
-            ys, xs = self.lane_frame.boundary(offsets[k], BEV_MAX_DIST_M, POLY_SAMPLES)
-            rows.extend(self._poly_segments(ys, xs, 0.22, max_segs=BOUNDARY_SEGS))
-        return rows[:24]
+        """Dashboard BEV shows only the ego lane — no outer road edges."""
+        return []
 
     def _lane_payload(self, slots, offsets):
-        """Adjacent lane markings between the ego pair and the road edge."""
-        if not self.lane_frame.valid or not slots:
-            return []
-        left = [k for k in slots if k < 0]
-        right = [k for k in slots if k > 0]
-        rows = []
-        for group, outer in ((left, min(left) if left else None),
-                             (right, max(right) if right else None)):
-            for k in group:
-                if abs(k) < 2 or k == outer:
-                    continue  # ego pair -> dashes, outermost -> road edge
-                pal = 1 if k < 0 else 2
-                ys, xs = self.lane_frame.boundary(offsets[k], BEV_MAX_DIST_M, POLY_SAMPLES)
-                rows.extend(self._poly_segments(ys, xs, 0.07, pal=pal, max_segs=BOUNDARY_SEGS))
-                if len(rows) >= 36:
-                    break
-        return rows[:36]
+        """Dashboard BEV shows only the ego lane — no adjacent markings."""
+        return []
 
     def _prefer_kind(self, obj):
         """Truck mesh only after a sticky vote — one YOLO 'truck' frame is not enough."""
