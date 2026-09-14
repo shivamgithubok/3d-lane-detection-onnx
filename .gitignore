@@ -51,3 +51,5 @@ scripts/debug/lane_param_sweep.py
 models/calib
 models/monocular_depth.engine
 models/midas_small.onnx
+*.json
+*.MP4
