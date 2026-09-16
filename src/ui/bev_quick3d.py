@@ -556,31 +556,40 @@ class BevQuick3DWidget(QQuickWidget):
                 continue
 
             x_cam = float(obj.get("X_3d", 0.0))
+            raw_off = float(obj.get("lane_offset_m", 0.0))
             if "lane_index" in obj:
                 raw_idx = int(obj.get("lane_index", 0))
-                lane_slot, _off = self._lane_assign.update_index(tid, raw_idx, 0.0)
+                if abs(raw_idx) > TRAFFIC_LANE_MAX:
+                    continue
+                lane_slot, off = self._lane_assign.update_index(tid, raw_idx, raw_off)
             else:
-                lane_slot, _off = self._lane_assign.update(tid, x_cam, z, lane_model)
+                lane_slot, off = self._lane_assign.update(tid, x_cam, z, lane_model)
             if lane_slot is None:
                 lane_slot = self._measured_lane_slot(obj)
+                off = raw_off
             if abs(int(lane_slot or 0)) > TRAFFIC_LANE_MAX:
                 continue
-            pending.append((obj, tid, int(lane_slot), z))
+            pending.append((obj, tid, int(lane_slot), z, float(off)))
 
         pending = self._spread_same_lane(pending)
 
-        for obj, tid, lane_slot, z in pending:
+        for obj, tid, lane_slot, z, off in pending:
             yaw, mode = self._heading_yaw(obj, z, lane_model)
             if mode in CROSS_MODES:
                 x = float(self._traffic_x(float(obj.get("X_3d", 0.0)), z))
                 y = float(z)
             else:
+                w = self._lane_width_m()
+                if lane_model is not None:
+                    x_meas = float(lane_model.lane_center_x(int(lane_slot), z)) + float(off)
+                else:
+                    x_meas = float(lane_slot) * w + float(off)
                 x, y = place_in_lane(
-                    0.0, z, lane_model, int(lane_slot),
-                    snap_strength=1.0, offset_clamp_m=0.0,
+                    x_meas, z, lane_model, int(lane_slot),
+                    snap_strength=0.0, offset_clamp_m=1.15,
                 )
                 if lane_model is None:
-                    x, y = float(lane_slot) * self._lane_width_m(), z
+                    x, y = float(x_meas), z
 
             bound = self._alloc_slot(tid, self._prefer_kind(obj))
             if bound is None:
@@ -616,11 +625,11 @@ class BevQuick3DWidget(QQuickWidget):
         for _lane, items in by_lane.items():
             items.sort(key=lambda t: t[3])
             last_z = None
-            for obj, tid, lane_slot, z in items:
+            for obj, tid, lane_slot, z, off in items:
                 if last_z is not None and z < last_z + SAME_LANE_GAP_M:
                     z = last_z + SAME_LANE_GAP_M
                 last_z = z
-                out.append((obj, tid, lane_slot, z))
+                out.append((obj, tid, lane_slot, z, off))
         return out
 
     def _on_extrap_tick(self):
@@ -709,6 +718,7 @@ class BevQuick3DWidget(QQuickWidget):
         right_3d=None,
         speed_mps=None,
         dt=1.0 / 30.0,
+        alerts=None,
     ):
         self.proposals = proposals if proposals is not None else []
         self.processed_objs = processed_objs if processed_objs is not None else []
@@ -726,6 +736,9 @@ class BevQuick3DWidget(QQuickWidget):
 
         self._push_ego_pose()
         self._push_cipo(self.processed_objs, cipo_status)
+        alerts = alerts or {}
+        self._set("ldwSide", str(alerts.get("ldw_side") or alerts.get("ldw") or ""))
+        self._set("fcwLevel", str(alerts.get("fcw") or "OFF"))
 
         rows = self._traffic_payload(self.processed_objs)
         self._traffic_seed = rows

@@ -25,6 +25,7 @@ if ROOT not in sys.path:
 
 from src.inference.cipo_tracker import CIPOTracker
 from src.inference.lprnet import LPRNetRecognizer, annotate_speed_dets
+from src.inference.ldw_fcw import AdasWarningTracker, draw_adas_alerts
 from src.inference.object_detector import OfflineYOLOVehicleDetector
 from src.inference.postprocess import postprocess_onnx_output
 from src.inference.speed_limit_tracker import SpeedLimitTracker
@@ -120,6 +121,7 @@ def main():
         tracker = CIPOTracker(P_matrix=P, danger_dist=15.0, warning_dist=30.0, ground_calib=gc)
         road = RoadStateEstimator()
         isa = SpeedLimitTracker(confirm_hits=3, act_conf=0.55)
+        warns = AdasWarningTracker()
         speed_log = EgoSpeedLog.auto_load(video)
 
         cap = cv2.VideoCapture(video)
@@ -129,6 +131,8 @@ def main():
         last_posted = None
         yolo_mph_counts = {}
         lpr_mph_counts = {}
+        ldw_n = fcw_n = fcw_plus_n = 0
+        alert_stills = 0
         stills = 0
         i = 0
         t_all = time.perf_counter()
@@ -213,6 +217,16 @@ def main():
                 dt=1.0 / 30.0,
                 ego_speed_mps=speed_mps,
             )
+            cipo_status = tracker.last_cipo_status
+            alerts = warns.update(
+                st.ego_left, st.ego_right, st.status, cipo, cipo_status, speed_mps, dt=1.0 / 30.0
+            )
+            if alerts["ldw"] in ("LEFT", "RIGHT"):
+                ldw_n += 1
+            if alerts["fcw"] == "FCW":
+                fcw_n += 1
+            elif alerts["fcw"] == "FCW+":
+                fcw_plus_n += 1
 
             if not args.no_draw:
                 vis = draw_front_view_cipo(
@@ -231,11 +245,23 @@ def main():
                 )
                 ego = speed_log.get_mph(i) if speed_log else None
                 vis = draw_isa_overlay(vis, snap, ego_mph=ego, detections=dets)
-                if ran_sign and dets and stills < 12 and (
+                vis = draw_adas_alerts(
+                    vis,
+                    alerts,
+                    ego_left=st.ego_left,
+                    ego_right=st.ego_right,
+                    P_matrix=np.asarray(P, dtype=np.float64),
+                    frame_transform=frame_tf,
+                    cipo_obj=cipo,
+                )
+                if ran_sign and dets and stills < 8 and (
                     snap.get("posted_mph") is not None or snap.get("candidate_mph") is not None
                 ):
                     cv2.imwrite(os.path.join(outdir, f"pipeline_f{i:04d}.jpg"), vis)
                     stills += 1
+                if alerts["priority"] != "none" and alert_stills < 16:
+                    cv2.imwrite(os.path.join(outdir, f"alert_f{i:04d}.jpg"), vis)
+                    alert_stills += 1
 
             e2e_ms.append((time.perf_counter() - t0) * 1000.0)
             i += 1
@@ -265,6 +291,9 @@ def main():
             "events": events,
             "yolo_class_counts": yolo_mph_counts,
             "lpr_mph_counts": {str(k): v for k, v in lpr_mph_counts.items()},
+            "ldw_frames": ldw_n,
+            "fcw_frames": fcw_n,
+            "fcw_plus_frames": fcw_plus_n,
             "draw": not args.no_draw,
             "ui_pace_note": "ADAS UI still sleeps to ~15 FPS; these numbers are uncapped compute.",
         }
@@ -282,6 +311,8 @@ def main():
             f"ISA confirmed    {stats['confirmed'] or 'none'}",
             f"YOLO classes     {yolo_mph_counts}",
             f"LPRNet mph       {lpr_mph_counts}",
+            f"LDW frames       {ldw_n}",
+            f"FCW / FCW+       {fcw_n} / {fcw_plus_n}",
             "UI note: worker still paces ~15 FPS with msleep; HUD latency is e2e_mean above.",
         ]
         text = "\n".join(lines) + "\n"

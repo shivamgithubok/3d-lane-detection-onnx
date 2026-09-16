@@ -59,6 +59,8 @@ Item {
     property real cipoX: 0
     property real cipoZ: -12
     property real cipoDist: 0
+    property string ldwSide: ""
+    property string fcwLevel: "OFF"
     readonly property color cipoGlow: cipoStatus === "DANGER" ? "#e23a3c"
                                      : (cipoStatus === "WARNING" ? "#e09a20" : "#3ec8ff")
     readonly property color corridorColor: cipoStatus === "DANGER" ? Qt.rgba(0.95, 0.18, 0.32, 0.80)
@@ -1154,6 +1156,37 @@ Item {
                 text: root.cipoVisible
                       ? ("CIPO: " + root.cipoStatus + "  " + root.cipoDist.toFixed(1) + "m")
                       : ("CIPO: " + root.cipoStatus)
+                color: "#ffffff"
+                font.pixelSize: 9
+                font.bold: true
+            }
+        }
+        Rectangle {
+            width: ldwBadgeTxt.implicitWidth + 16
+            height: 18
+            radius: 3
+            color: (root.ldwSide === "LEFT" || root.ldwSide === "RIGHT") ? "#d9822b" : "#21262d"
+            Text {
+                id: ldwBadgeTxt
+                anchors.centerIn: parent
+                text: (root.ldwSide === "LEFT" || root.ldwSide === "RIGHT")
+                      ? ("LDW " + (root.ldwSide === "LEFT" ? "L" : "R"))
+                      : "LDW"
+                color: "#ffffff"
+                font.pixelSize: 9
+                font.bold: true
+            }
+        }
+        Rectangle {
+            width: fcwBadgeTxt.implicitWidth + 16
+            height: 18
+            radius: 3
+            color: root.fcwLevel === "FCW+" ? "#da3633"
+                 : (root.fcwLevel === "FCW" ? "#d9822b" : "#21262d")
+            Text {
+                id: fcwBadgeTxt
+                anchors.centerIn: parent
+                text: root.fcwLevel === "OFF" || root.fcwLevel === "" ? "FCW" : root.fcwLevel
                 color: "#ffffff"
                 font.pixelSize: 9
                 font.bold: true

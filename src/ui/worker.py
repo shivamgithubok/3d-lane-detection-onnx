@@ -23,6 +23,7 @@ from src.inference.traffic_sign_detector import (
     resolve_model_path,
 )
 from src.inference.lprnet import LPRNetRecognizer, annotate_speed_dets, default_paths as lpr_paths
+from src.inference.ldw_fcw import AdasWarningTracker, draw_adas_alerts
 from src.utils.split_visualization import draw_front_view_cipo
 from src.utils.camera_transform import CameraTransform
 from src.tracking.road_state import RoadStateEstimator
@@ -45,9 +46,9 @@ def preprocess_frame(frame):
 
 class InferenceWorker(QThread):
     # Signal emitted to UI: frame_rgb, proposals, processed_objs, cipo_obj, cipo_status,
-    # left_3d, right_3d, avg_fps, latency_ms, speed_mps, source_dt
+    # left_3d, right_3d, avg_fps, latency_ms, speed_mps, source_dt, alerts
     # speed_mps / source_dt drive the lane-anchored BEV: the road scrolls by v*dt.
-    frame_processed = Signal(np.ndarray, list, list, object, str, object, object, float, float, object, float)
+    frame_processed = Signal(np.ndarray, list, list, object, str, object, object, float, float, object, float, object)
     status_message = Signal(str)
 
     def __init__(self, video_path=None, model_path="models/anchor3dlane_raw.engine", parent=None):
@@ -67,6 +68,7 @@ class InferenceWorker(QThread):
         self._sign_every = 4
         self._last_sign_dets = []
         self._isa_use_class = True
+        self.alerts = AdasWarningTracker()
         # P is LOCKED to OpenLane training extrinsics. Retuning pitch (e.g. Garmin -6°)
         # shears the front corridor vs cyan lanes — model 3D assumes this camera.
         pitch, height = preset_for_video(video_path)
@@ -259,6 +261,12 @@ class InferenceWorker(QThread):
                 ego_left, ego_right = None, None
                 left_3d, right_3d = None, None
                 speed_mps = None
+                alerts_snap = {
+                    "ldw": "OFF",
+                    "fcw": "OFF",
+                    "priority": "none",
+                    "ldw_side": None,
+                }
 
                 if frame is not None and use_trt:
                     # Step A: 3D Lane TensorRT Inference
@@ -347,6 +355,16 @@ class InferenceWorker(QThread):
                         )
                         cipo_status = tracker.last_cipo_status
 
+                    alerts_snap = self.alerts.update(
+                        ego_left,
+                        ego_right,
+                        road_state.status,
+                        cipo_obj,
+                        cipo_status,
+                        speed_mps,
+                        dt=source_dt,
+                    )
+
                 # Step D: All rendering reads the same validated temporal road state.
                 if frame is None or not use_trt:
                     left_3d, right_3d = None, None
@@ -377,6 +395,15 @@ class InferenceWorker(QThread):
                             ego_mph=ego_mph,
                             detections=self._last_sign_dets,
                         )
+                    annotated_frame = draw_adas_alerts(
+                        annotated_frame,
+                        alerts_snap,
+                        ego_left=ego_left,
+                        ego_right=ego_right,
+                        P_matrix=np.asarray(self.P_matrix, dtype=np.float64),
+                        frame_transform=frame_transform,
+                        cipo_obj=cipo_obj,
+                    )
                     frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
                     # Downscale for UI transfer/paint (keeps HUD readable, cuts Qt cost)
                     max_w = 960
@@ -399,7 +426,7 @@ class InferenceWorker(QThread):
                 # Emit signal to GUI
                 self.frame_processed.emit(
                     frame_rgb, proposals, processed_objs, cipo_obj, cipo_status, left_3d, right_3d,
-                    avg_fps, latency_ms, speed_mps, float(source_dt)
+                    avg_fps, latency_ms, speed_mps, float(source_dt), alerts_snap
                 )
 
                 frame_i += 1

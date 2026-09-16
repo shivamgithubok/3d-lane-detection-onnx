@@ -40,7 +40,7 @@ scripts/build_openlane1000_notebook.py
 scripts/patch_mmcv_sanity_cell.py
 scripts/analyze_bev_frames.py
 models/*.engine
-models/*.onnx
+# models/*.onnx
 models/*.pt
 *__pycache__
 src/inference/__pycache__

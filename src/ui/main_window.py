@@ -124,10 +124,16 @@ class ADASMainWindow(QMainWindow):
         self.lbl_latency.setObjectName("hud_badge")
         self.lbl_status_hud = QLabel("Status: INITIALIZING")
         self.lbl_status_hud.setObjectName("hud_badge")
+        self.lbl_ldw = QLabel("LDW")
+        self.lbl_ldw.setObjectName("hud_badge")
+        self.lbl_fcw = QLabel("FCW")
+        self.lbl_fcw.setObjectName("hud_badge")
 
         header_layout.addWidget(self.lbl_fps)
         header_layout.addWidget(self.lbl_latency)
         header_layout.addWidget(self.lbl_status_hud)
+        header_layout.addWidget(self.lbl_ldw)
+        header_layout.addWidget(self.lbl_fcw)
 
         main_layout.addWidget(header)
 
@@ -220,9 +226,10 @@ class ADASMainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready. PySide6 Engine active.")
 
-    @Slot(np.ndarray, list, list, object, str, object, object, float, float, object, float)
+    @Slot(np.ndarray, list, list, object, str, object, object, float, float, object, float, object)
     def on_frame_processed(self, frame_rgb, proposals, processed_objs, cipo_obj, cipo_status,
-                           left_3d, right_3d, fps, latency_ms, speed_mps=None, source_dt=1.0 / 30.0):
+                           left_3d, right_3d, fps, latency_ms, speed_mps=None, source_dt=1.0 / 30.0,
+                           alerts=None):
         """Callback invoked when worker thread emits a newly processed frame."""
         # 1. Update Camera Video Label
         h, w, ch = frame_rgb.shape
@@ -235,7 +242,7 @@ class ADASMainWindow(QMainWindow):
         # 2. Update BEV Canvas Widget
         self.bev_widget.update_bev_data(
             proposals, processed_objs, cipo_status, left_3d, right_3d,
-            speed_mps=speed_mps, dt=source_dt,
+            speed_mps=speed_mps, dt=source_dt, alerts=alerts,
         )
 
         # 3. Update HUD Badges
@@ -257,6 +264,28 @@ class ADASMainWindow(QMainWindow):
             self.lbl_status_hud.setStyleSheet("background-color: #6E7681; color: #FFFFFF;")
         else:
             self.lbl_status_hud.setStyleSheet("background-color: #238636; color: #FFFFFF;")
+
+        alerts = alerts or {}
+        ldw = alerts.get("ldw") or "OFF"
+        fcw = alerts.get("fcw") or "OFF"
+        idle = "background-color: #21262D; color: #C9D1D9; border: 1px solid #30363D;"
+        amber = "background-color: #D9822B; color: #FFFFFF;"
+        red = "background-color: #DA3633; color: #FFFFFF;"
+        if ldw in ("LEFT", "RIGHT"):
+            self.lbl_ldw.setText(f"LDW {ldw[0]}")
+            self.lbl_ldw.setStyleSheet(amber)
+        else:
+            self.lbl_ldw.setText("LDW")
+            self.lbl_ldw.setStyleSheet(idle)
+        if fcw == "FCW+":
+            self.lbl_fcw.setText("FCW+")
+            self.lbl_fcw.setStyleSheet(red)
+        elif fcw == "FCW":
+            self.lbl_fcw.setText("FCW")
+            self.lbl_fcw.setStyleSheet(amber)
+        else:
+            self.lbl_fcw.setText("FCW")
+            self.lbl_fcw.setStyleSheet(idle)
 
 
     @Slot(str)
