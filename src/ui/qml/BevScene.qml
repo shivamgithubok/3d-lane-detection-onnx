@@ -19,6 +19,13 @@ Item {
     property bool cinematicRoad: true
     property bool showLaneLines: true
     property bool showCalib: false
+    // Metric debug overlay: ego centreline, 10 m ruler ticks, per-object (x, z)
+    // labels in metres. Toggle from Python via _set("debugMetric", True).
+    property bool debugMetric: false
+    property real debugMaxZ: 60.0
+    // Parsed trafficJson rows, kept for the metric labels above. Populated by
+    // applyTraffic so the labels can never disagree with what was drawn.
+    property var debugRows: []
     // Background: Auto (clock) | Day | Dusk | Night | Demo
     property string envMode: "auto"
     property real clockHour: 12.0
@@ -82,7 +89,14 @@ Item {
     property bool laneValid: false
     property bool laneHeld: false
     property real targetCarLength: 4.6
+    property real targetTruckLength: 10.0
     property bool egoFitted: false
+    property bool skodaFitted: false
+    property bool shcFitted: false
+    property bool dodgeFitted: false
+    property real skodaY: 0
+    property real shcY: 0
+    property real dodgeY: 0
     property string egoDebug: "bounds pending"
     property string trafficJson: "[]"
     property int trafficCount: 0
@@ -93,6 +107,9 @@ Item {
 
     onTrafficJsonChanged: applyTraffic()
     onTeslaYChanged: applyTraffic()
+    onSkodaYChanged: applyTraffic()
+    onShcYChanged: applyTraffic()
+    onDodgeYChanged: applyTraffic()
     onCorridorJsonChanged: applySegPool(corrRep, root.corridorJson, 0.035)
     onLaneJsonChanged: applyLanes()
     onDashJsonChanged: applyDashes()
@@ -478,32 +495,50 @@ Item {
     function applyTraffic() {
         let rows = []
         try { rows = JSON.parse(root.trafficJson || "[]") } catch (e) { rows = [] }
+        root.debugRows = rows
         const pools = [
-            [skoda0, skoda1, skoda2],
+            [skoda0, skoda1, skoda2, skoda3, skoda4, skoda5, skoda6, skoda7],
             [tesla0],
             [shc0],
-            [truck0]
+            [truck0, truck1]
         ]
-        const used = [0, 0, 0, 0]
+        const occupied = [
+            [false, false, false, false, false, false, false, false],
+            [false],
+            [false],
+            [false, false]
+        ]
         for (let i = 0; i < rows.length; i++) {
             const r = rows[i]
             let kind = r.kind | 0
-            if (kind < 0 || kind > 3)
-                kind = 0
-            if (used[kind] >= pools[kind].length)
-                kind = 0
-            if (used[kind] >= pools[kind].length)
+            let slot = r.slot | 0
+            if (kind < 0 || kind >= pools.length)
                 continue
-            const node = pools[kind][used[kind]++]
+            if (slot < 0 || slot >= pools[kind].length)
+                continue
+            const node = pools[kind][slot]
             node.visible = true
-            const py = (kind === 1) ? root.teslaY : r.posY
-            node.position = Qt.vector3d(r.posX, py, r.posZ)
-            // Same heading as ego (rear toward chase cam). Tesla mesh X-90 is on teslaFix.
-            node.eulerRotation = Qt.vector3d(0, root.egoRotY, 0)
+            occupied[kind][slot] = true
+            const py = (kind === 1) ? root.teslaY
+                     : (kind === 0) ? root.skodaY
+                     : (kind === 2) ? root.shcY
+                     : root.dodgeY
+            node.x = r.posX
+            node.y = py
+            node.z = r.posZ
+            node.eulerRotation = Qt.vector3d(0, (r.yawDeg !== undefined ? r.yawDeg : root.egoRotY), 0)
+            // Far cars otherwise shrink to specks in the chase camera.
+            const z = Math.max(0.0, -r.posZ)
+            const boost = (z > 18.0) ? Math.min(1.9, 1.0 + 0.016 * (z - 18.0)) : 1.0
+            node.scale = Qt.vector3d(boost, boost, boost)
         }
         for (let k = 0; k < pools.length; k++) {
-            for (let j = used[k]; j < pools[k].length; j++)
-                pools[k][j].visible = false
+            for (let j = 0; j < pools[k].length; j++) {
+                if (!occupied[k][j]) {
+                    pools[k][j].visible = false
+                    pools[k][j].scale = Qt.vector3d(1, 1, 1)
+                }
+            }
         }
         root.trafficCount = rows.length
     }
@@ -548,10 +583,9 @@ Item {
         if (longest < 1.5) {
             const s = root.targetCarLength / longest
             root.egoScale = s
-            root.skodaScale = s
             root.egoY = -mn.y * s
             root.egoDebug += "  → scale " + s.toFixed(1)
-            // Tesla/SHC/Dodge keep their own GLB node scales — do not copy Audi fit.
+            // Never copy Audi fit onto traffic — Skoda/SHC/Dodge have their own units.
         } else if (longest > 20.0) {
             const s = root.targetCarLength / longest
             root.egoScale = s
@@ -562,6 +596,52 @@ Item {
         }
         root.egoFitted = true
         console.log("[BEV] ego fit", root.egoDebug)
+    }
+
+    function fitMeshToCarLength(loader, targetLen) {
+        if (!loader || loader.status !== RuntimeLoader.Success)
+            return null
+        const mn = loader.bounds.minimum
+        const mx = loader.bounds.maximum
+        const dx = Math.abs(mx.x - mn.x)
+        const dy = Math.abs(mx.y - mn.y)
+        const dz = Math.abs(mx.z - mn.z)
+        const longest = Math.max(dx, dy, dz)
+        if (longest < 1e-4)
+            return null
+        const want = (targetLen === undefined || targetLen === null) ? root.targetCarLength : targetLen
+        const s = want / longest
+        return { s: s, y: -Math.min(mn.y, mx.y) * s, longest: longest }
+    }
+
+    function fitSkodaFromBounds() {
+        const f = fitMeshToCarLength(skodaLoader)
+        if (!f)
+            return
+        root.skodaScale = f.s
+        root.skodaY = f.y
+        root.skodaFitted = true
+        console.log("[BEV] skoda fit longest", f.longest.toFixed(3), "scale", f.s.toFixed(3), "y", f.y.toFixed(3))
+    }
+
+    function fitShcFromBounds() {
+        const f = fitMeshToCarLength(shcLoader)
+        if (!f)
+            return
+        root.shcScale = f.s
+        root.shcY = f.y
+        root.shcFitted = true
+        console.log("[BEV] shc fit longest", f.longest.toFixed(3), "scale", f.s.toFixed(3), "y", f.y.toFixed(3))
+    }
+
+    function fitDodgeFromBounds() {
+        const f = fitMeshToCarLength(dodgeLoader, root.targetTruckLength)
+        if (!f)
+            return
+        root.dodgeScale = f.s
+        root.dodgeY = f.y
+        root.dodgeFitted = true
+        console.log("[BEV] truck fit longest", f.longest.toFixed(3), "scale", f.s.toFixed(3), "y", f.y.toFixed(3))
     }
 
     function fitTeslaFromBounds() {
@@ -713,6 +793,39 @@ Item {
             }
         }
 
+        // ---- metric debug overlay -------------------------------------
+        // Ego centreline at x=0 plus 10 m ruler ticks, in scene metres. This
+        // is the ground truth against which trafficJson positions are read:
+        // if a car sits between the 30 and 40 m ticks its posZ really is -3x.
+        Model {
+            source: "#Cube"
+            visible: root.debugMetric
+            position: Qt.vector3d(0, 0.06, -0.5 * root.debugMaxZ)
+            scale: Qt.vector3d(0.0004, 0.0002, root.debugMaxZ / 100.0)
+            materials: PrincipledMaterial {
+                lighting: PrincipledMaterial.NoLighting
+                baseColor: "#ff3b30"
+                opacity: 0.75
+                alphaMode: PrincipledMaterial.Blend
+            }
+        }
+        Repeater3D {
+            model: Math.floor(root.debugMaxZ / 10) + 1
+            Model {
+                source: "#Cube"
+                visible: root.debugMetric && index > 0
+                position: Qt.vector3d(0, 0.06, -index * 10.0)
+                // 8 m wide tick, 12 cm deep: reads as a rung on the centreline.
+                scale: Qt.vector3d(0.08, 0.0002, 0.0012)
+                materials: PrincipledMaterial {
+                    lighting: PrincipledMaterial.NoLighting
+                    baseColor: "#ff9500"
+                    opacity: 0.65
+                    alphaMode: PrincipledMaterial.Blend
+                }
+            }
+        }
+
         Repeater3D {
             id: corrRep
             model: 14
@@ -812,15 +925,21 @@ Item {
         }
 
         // Pooled traffic: one RuntimeLoader per slot, source set once.
-        Node {
+        component TrafficRig: Node {
+            visible: false
+            Behavior on x { NumberAnimation { duration: 80; easing.type: Easing.Linear } }
+            Behavior on z { NumberAnimation { duration: 80; easing.type: Easing.Linear } }
+        }
+        TrafficRig {
             id: skoda0
             visible: false
             RuntimeLoader {
+                id: skodaLoader
                 source: root.skodaGltf
                 scale: Qt.vector3d(root.skodaScale, root.skodaScale, root.skodaScale)
             }
         }
-        Node {
+        TrafficRig {
             id: skoda1
             visible: false
             RuntimeLoader {
@@ -828,7 +947,7 @@ Item {
                 scale: Qt.vector3d(root.skodaScale, root.skodaScale, root.skodaScale)
             }
         }
-        Node {
+        TrafficRig {
             id: skoda2
             visible: false
             RuntimeLoader {
@@ -836,7 +955,47 @@ Item {
                 scale: Qt.vector3d(root.skodaScale, root.skodaScale, root.skodaScale)
             }
         }
-        Node {
+        TrafficRig {
+            id: skoda3
+            visible: false
+            RuntimeLoader {
+                source: root.skodaGltf
+                scale: Qt.vector3d(root.skodaScale, root.skodaScale, root.skodaScale)
+            }
+        }
+        TrafficRig {
+            id: skoda4
+            visible: false
+            RuntimeLoader {
+                source: root.skodaGltf
+                scale: Qt.vector3d(root.skodaScale, root.skodaScale, root.skodaScale)
+            }
+        }
+        TrafficRig {
+            id: skoda5
+            visible: false
+            RuntimeLoader {
+                source: root.skodaGltf
+                scale: Qt.vector3d(root.skodaScale, root.skodaScale, root.skodaScale)
+            }
+        }
+        TrafficRig {
+            id: skoda6
+            visible: false
+            RuntimeLoader {
+                source: root.skodaGltf
+                scale: Qt.vector3d(root.skodaScale, root.skodaScale, root.skodaScale)
+            }
+        }
+        TrafficRig {
+            id: skoda7
+            visible: false
+            RuntimeLoader {
+                source: root.skodaGltf
+                scale: Qt.vector3d(root.skodaScale, root.skodaScale, root.skodaScale)
+            }
+        }
+        TrafficRig {
             id: tesla0
             visible: false
             // Inner node: cancel Tesla GLB extra X-90. Outer node yaw = ego (180).
@@ -858,22 +1017,53 @@ Item {
             running: teslaCar.status === RuntimeLoader.Success && !root.teslaFitted
             onTriggered: root.fitTeslaFromBounds()
         }
-        Node {
+        Timer {
+            id: skodaFitTimer
+            interval: 33
+            repeat: true
+            running: skodaLoader.status === RuntimeLoader.Success && !root.skodaFitted
+            onTriggered: root.fitSkodaFromBounds()
+        }
+        TrafficRig {
             id: shc0
             visible: false
             RuntimeLoader {
+                id: shcLoader
                 source: root.shcGltf
                 scale: Qt.vector3d(root.shcScale, root.shcScale, root.shcScale)
                 eulerRotation: Qt.vector3d(0, root.shcRotY, 0)
             }
         }
-        Node {
+        Timer {
+            id: shcFitTimer
+            interval: 33
+            repeat: true
+            running: shcLoader.status === RuntimeLoader.Success && !root.shcFitted
+            onTriggered: root.fitShcFromBounds()
+        }
+        TrafficRig {
             id: truck0
+            visible: false
+            RuntimeLoader {
+                id: dodgeLoader
+                source: root.dodgeGltf
+                scale: Qt.vector3d(root.dodgeScale, root.dodgeScale, root.dodgeScale)
+            }
+        }
+        TrafficRig {
+            id: truck1
             visible: false
             RuntimeLoader {
                 source: root.dodgeGltf
                 scale: Qt.vector3d(root.dodgeScale, root.dodgeScale, root.dodgeScale)
             }
+        }
+        Timer {
+            id: dodgeFitTimer
+            interval: 33
+            repeat: true
+            running: dodgeLoader.status === RuntimeLoader.Success && !root.dodgeFitted
+            onTriggered: root.fitDodgeFromBounds()
         }
     }
 
@@ -918,6 +1108,30 @@ Item {
         }
     }
 
+    // Per-object metric readout: prints each rendered car's (x, z) in metres
+    // beside its model, so BEV placement can be checked against the
+    // range_diagnostics.py CSV without instrumenting the renderer.
+    Repeater {
+        model: root.debugMetric ? root.debugRows : []
+        delegate: Text {
+            // mapFrom3DScene projects the metric scene point into viewport px,
+            // so the label tracks the car under camera orbit and zoom.
+            readonly property vector3d vp: view.mapFrom3DScene(
+                Qt.vector3d(modelData.posX, 1.2, modelData.posZ))
+            visible: vp.z > 0
+            x: vp.x + 8
+            y: vp.y - 8
+            z: 4
+            text: "#" + modelData.tid + "  x=" + modelData.posX.toFixed(2)
+                  + "  z=" + (-modelData.posZ).toFixed(1) + " m"
+            color: "#ffd60a"
+            font.pixelSize: 10
+            font.bold: true
+            style: Text.Outline
+            styleColor: "#000000"
+        }
+    }
+
     Column {
         anchors.left: parent.left
         anchors.top: parent.top
@@ -925,6 +1139,13 @@ Item {
         spacing: 4
         z: 3
 
+        Text {
+            visible: root.debugMetric
+            text: "DEBUG METRIC  centreline x=0, ticks 10 m"
+            color: "#ff9500"
+            font.pixelSize: 10
+            font.bold: true
+        }
         Text {
             text: "QT QUICK 3D BEV"
             color: "#c9d1d9"
@@ -936,7 +1157,8 @@ Item {
             height: 18
             radius: 3
             color: root.cipoStatus === "DANGER" ? "#da3633"
-                 : (root.cipoStatus === "WARNING" ? "#d9822b" : "#238636")
+                 : (root.cipoStatus === "WARNING" ? "#d9822b"
+                 : (root.cipoStatus === "DEGRADED" ? "#6e7681" : "#238636"))
             Text {
                 id: cipoBadgeTxt
                 anchors.centerIn: parent

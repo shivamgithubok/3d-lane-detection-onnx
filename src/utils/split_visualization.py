@@ -16,31 +16,20 @@ from src.utils.draw_3d_box import draw_3d_wireframe_box
 
 def _draw_pro_detection_box(img, overlay, x1, y1, x2, y2, track_id, label, dist_m, color, is_cipo=False):
     """
-    Pro-designer 2D detection box rendered via single-pass overlay:
-      • Semi-transparent fill tinted by risk color (drawn on overlay)
-      • Outer glow ring for CIPO / danger targets (drawn on overlay)
+    Thin 2D detection box:
+      • 1px outline only (no fill / glow over the vehicle)
       • Dark translucent label chip background (drawn on overlay)
       • Vector line work & crisp drop-shadowed text (drawn on img)
     """
 
-    # ── 1. Semi-transparent fill (on overlay) ─────────────────────────────
-    cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
-
-    # ── 2. Outer glow ring for CIPO / danger targets (on overlay) ─────────
-    if is_cipo:
-        glow_col = (30, 30, 220)
-        for expand in (5, 3, 1):
-            cv2.rectangle(overlay, (x1 - expand, y1 - expand),
-                                   (x2 + expand, y2 + expand), glow_col, 1)
-
-    # ── 3. Thin 1px border ────────────────────────────────────────────────
+    # ── 1. Thin 1px border (no fill, no glow) ─────────────────────────────
     cv2.rectangle(img, (x1, y1), (x2, y2), color, 1, cv2.LINE_AA)
 
-    # ── 4. Corner accent brackets ─────────────────────────────────────────
+    # ── 2. Thin 1px corner brackets ───────────────────────────────────────
     w_box = x2 - x1
     h_box = y2 - y1
-    c_len   = max(10, min(22, w_box // 4, h_box // 4))
-    c_thick = 2
+    c_len   = max(8, min(16, w_box // 5, h_box // 5))
+    c_thick = 1
 
     corners = [
         (x1, y1,  1,  1),   # Top-Left
@@ -52,7 +41,7 @@ def _draw_pro_detection_box(img, overlay, x1, y1, x2, y2, track_id, label, dist_
         cv2.line(img, (cx, cy), (cx + dx * c_len, cy),           color, c_thick, cv2.LINE_AA)
         cv2.line(img, (cx, cy), (cx,              cy + dy * c_len), color, c_thick, cv2.LINE_AA)
 
-    # ── 5. Label chip ─────────────────────────────────────────────────────
+    # ── 3. Label chip ─────────────────────────────────────────────────────
     lbl_lower = label.lower()
     if "truck" in lbl_lower or "bus" in lbl_lower:
         cls_code = "TRUCK"
@@ -193,7 +182,7 @@ def draw_front_view_cipo(
     Renders front camera view with ultra-fast single-pass overlay blending:
       - Translucent cyan→violet drivable corridor (margin inset; clipped above hood)
       - 3D lane polylines projected with full P_matrix (model Z kept — calibrated look)
-      - Professional 2D detection boxes with ID/class/distance label chips
+      - Thin 1px 2D detection boxes with ID/class/distance label chips
     """
     annotated = frame.copy()
     overlay   = frame.copy()
@@ -363,7 +352,7 @@ def create_split_window(front_view, bev_view, cipo_obj, fps_val, canvas_size=(72
 
     hud = np.ones((hud_height, target_w, 3), dtype=np.uint8) * 20
     cv2.putText(hud, f"PERFORMANCE: {fps_val:.1f} FPS", (20, 30),  cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
-    cv2.putText(hud, "ENGINE: Triple TensorRT FP16 + YOLO ByteTrack + MiDaS Depth", (20, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1)
+    cv2.putText(hud, "ENGINE: TensorRT FP16 + YOLO ByteTrack + ground-plane range", (20, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1)
 
     cv2.putText(hud, "MONITOR: DRIVABLE AREA SAFETY ACTIVE", (320, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 128), 2)
     cv2.putText(hud, "RULES: <15m RED | 15-30m YELLOW | >30m GREEN", (320, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)

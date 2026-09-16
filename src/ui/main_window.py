@@ -38,24 +38,18 @@ class ADASMainWindow(QMainWindow):
         self.worker = InferenceWorker(video_path=self.video_path, model_path=self.model_path)
         self.worker.frame_processed.connect(self.on_frame_processed)
         self.worker.status_message.connect(self.on_status_message)
-        # Cal shows OpenLane defaults; P is locked in the worker (do not retune for Garmin).
-        # Do NOT push Cal pitch into BEV calibPitch — that is a view tilt, not extrinsics.
+        # Cal sliders retune object GroundCalibration. P / BEV view stay untouched.
         if self.calib_panel is not None:
+            self.calib_panel.set_from_calib(self.worker.ground_calib)
             self.calib_panel.calibration_changed.connect(self.on_calibration_changed)
-            self.worker.set_calibration(self.calib_panel.pitch_deg, self.calib_panel.height_m)
         self.worker.start()
 
     def on_calibration_changed(self, pitch_deg, height_m):
-        # Snap UI back to training extrinsics; never rebuild P from free sliders.
-        if abs(pitch_deg - self.preset_pitch) > 1e-3 or abs(height_m - self.preset_height) > 1e-3:
-            self.calib_panel.blockSignals(True)
-            self.calib_panel.reset_defaults()
-            self.calib_panel.blockSignals(False)
-            self.statusBar().showMessage(
-                "P locked to OpenLane (−3° / 1.5 m) — retuning breaks corridor projection",
-                4000,
-            )
-        self.worker.set_calibration(self.preset_pitch, self.preset_height)
+        self.worker.set_object_calib(pitch_deg, height_m)
+        self.statusBar().showMessage(
+            f"Object range: pitch {pitch_deg:.1f}°  h {height_m:.2f} m",
+            2000,
+        )
 
     def apply_dark_theme(self):
         """Applies a sleek, dark ADAS futuristic theme."""
@@ -287,6 +281,8 @@ class ADASMainWindow(QMainWindow):
             self.worker = InferenceWorker(video_path=file_name, model_path=self.model_path)
             self.worker.frame_processed.connect(self.on_frame_processed)
             self.worker.status_message.connect(self.on_status_message)
+            if self.calib_panel is not None:
+                self.calib_panel.set_from_calib(self.worker.ground_calib)
             self.worker.start()
 
     def closeEvent(self, event):
