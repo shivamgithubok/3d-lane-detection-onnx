@@ -124,10 +124,16 @@ class ADASMainWindow(QMainWindow):
         self.lbl_latency.setObjectName("hud_badge")
         self.lbl_status_hud = QLabel("Status: INITIALIZING")
         self.lbl_status_hud.setObjectName("hud_badge")
+        self.lbl_ldw = QLabel("LDW")
+        self.lbl_ldw.setObjectName("hud_badge")
+        self.lbl_fcw = QLabel("FCW")
+        self.lbl_fcw.setObjectName("hud_badge")
 
         header_layout.addWidget(self.lbl_fps)
         header_layout.addWidget(self.lbl_latency)
         header_layout.addWidget(self.lbl_status_hud)
+        header_layout.addWidget(self.lbl_ldw)
+        header_layout.addWidget(self.lbl_fcw)
 
         main_layout.addWidget(header)
 
@@ -179,8 +185,15 @@ class ADASMainWindow(QMainWindow):
 
         self.btn_road_style = None
         self.btn_lane_lines = None
+        self.btn_scenic = None
         # Always show extrinsics (P2) — drives front P_matrix + BEV camera
         bev_ctrl_layout = QHBoxLayout()
+        if isinstance(self.bev_widget, BevQuick3DWidget):
+            self.btn_scenic = QPushButton("View: Road")
+            self.btn_scenic.setObjectName("ctrl_btn")
+            self.btn_scenic.setToolTip("Scene: sky, grass, mountains. Road: one-color pavement only.")
+            self.btn_scenic.clicked.connect(self.toggle_scenic_view)
+            bev_ctrl_layout.addWidget(self.btn_scenic)
         if not isinstance(self.bev_widget, BevQuick3DWidget):
             btn_reset_bev = QPushButton("Reset BEV")
             btn_reset_bev.setObjectName("ctrl_btn")
@@ -213,9 +226,10 @@ class ADASMainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready. PySide6 Engine active.")
 
-    @Slot(np.ndarray, list, list, object, str, object, object, float, float, object, float)
+    @Slot(np.ndarray, list, list, object, str, object, object, float, float, object, float, object)
     def on_frame_processed(self, frame_rgb, proposals, processed_objs, cipo_obj, cipo_status,
-                           left_3d, right_3d, fps, latency_ms, speed_mps=None, source_dt=1.0 / 30.0):
+                           left_3d, right_3d, fps, latency_ms, speed_mps=None, source_dt=1.0 / 30.0,
+                           alerts=None):
         """Callback invoked when worker thread emits a newly processed frame."""
         # 1. Update Camera Video Label
         h, w, ch = frame_rgb.shape
@@ -228,7 +242,7 @@ class ADASMainWindow(QMainWindow):
         # 2. Update BEV Canvas Widget
         self.bev_widget.update_bev_data(
             proposals, processed_objs, cipo_status, left_3d, right_3d,
-            speed_mps=speed_mps, dt=source_dt,
+            speed_mps=speed_mps, dt=source_dt, alerts=alerts,
         )
 
         # 3. Update HUD Badges
@@ -250,6 +264,28 @@ class ADASMainWindow(QMainWindow):
             self.lbl_status_hud.setStyleSheet("background-color: #6E7681; color: #FFFFFF;")
         else:
             self.lbl_status_hud.setStyleSheet("background-color: #238636; color: #FFFFFF;")
+
+        alerts = alerts or {}
+        ldw = alerts.get("ldw") or "OFF"
+        fcw = alerts.get("fcw") or "OFF"
+        idle = "background-color: #21262D; color: #C9D1D9; border: 1px solid #30363D;"
+        amber = "background-color: #D9822B; color: #FFFFFF;"
+        red = "background-color: #DA3633; color: #FFFFFF;"
+        if ldw in ("LEFT", "RIGHT"):
+            self.lbl_ldw.setText(f"LDW {ldw[0]}")
+            self.lbl_ldw.setStyleSheet(amber)
+        else:
+            self.lbl_ldw.setText("LDW")
+            self.lbl_ldw.setStyleSheet(idle)
+        if fcw == "FCW+":
+            self.lbl_fcw.setText("FCW+")
+            self.lbl_fcw.setStyleSheet(red)
+        elif fcw == "FCW":
+            self.lbl_fcw.setText("FCW")
+            self.lbl_fcw.setStyleSheet(amber)
+        else:
+            self.lbl_fcw.setText("FCW")
+            self.lbl_fcw.setStyleSheet(idle)
 
 
     @Slot(str)
@@ -273,6 +309,11 @@ class ADASMainWindow(QMainWindow):
         if self.btn_lane_lines is not None:
             self.btn_lane_lines.setChecked(show)
             self.btn_lane_lines.setText("Lanes: ON" if show else "Lanes: OFF")
+
+    def toggle_scenic_view(self):
+        scenic = self.bev_widget.toggle_scenic_view()
+        if self.btn_scenic is not None:
+            self.btn_scenic.setText("View: Scene" if scenic else "View: Road")
 
     def open_video_file(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "Open MP4 Video File", "", "Video Files (*.mp4 *.avi *.mkv)")

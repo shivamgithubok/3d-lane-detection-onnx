@@ -59,6 +59,88 @@ def _iou(a, b):
     return float(inter / denom) if denom > 0 else 0.0
 
 
+def _box_area(b):
+    return max(0, b[2] - b[0]) * max(0, b[3] - b[1])
+
+
+def _inter_area(a, b):
+    ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
+    ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
+    return max(0, ix2 - ix1) * max(0, iy2 - iy1)
+
+
+def _boxes_same_object(a, b, iou_thr=0.45, cover_thr=0.62):
+    """True when two boxes are the same vehicle (incl. car-inside-truck)."""
+    iou = _iou(a, b)
+    if iou >= iou_thr:
+        return True
+    inter = _inter_area(a, b)
+    if inter <= 0:
+        return False
+    smaller = min(_box_area(a), _box_area(b))
+    return smaller > 0 and (inter / smaller) >= cover_thr
+
+
+_TRUCKISH = frozenset({"truck", "bus", "lorry"})
+_CARISH = frozenset({"car", "motorcycle", "bike"})
+
+
+def _dedupe_vehicle_boxes(detections):
+    """One detection per physical vehicle.
+
+    YOLOv8 NMS is class-aware, so the same car often survives as both `car` and
+    `truck`. On overlap keep the car unless the truck/bus box is clearly bigger
+    and more confident.
+    """
+    if len(detections) < 2:
+        return detections
+    n = len(detections)
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[rj] = ri
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if _boxes_same_object(detections[i]["bbox"], detections[j]["bbox"]):
+                union(i, j)
+
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+
+    kept = []
+    for idxs in groups.values():
+        if len(idxs) == 1:
+            kept.append(detections[idxs[0]])
+            continue
+        cars = [detections[i] for i in idxs if detections[i].get("class", "car") in _CARISH]
+        trucks = [detections[i] for i in idxs if detections[i].get("class", "car") in _TRUCKISH]
+        others = [detections[i] for i in idxs]
+        best = max(others, key=lambda d: float(d.get("conf", 0.0)))
+        if cars and trucks:
+            c = max(cars, key=lambda d: float(d.get("conf", 0.0)))
+            t = max(trucks, key=lambda d: float(d.get("conf", 0.0)))
+            t_area = _box_area(t["bbox"])
+            c_area = _box_area(c["bbox"])
+            truck_wins = (
+                float(t["conf"]) >= float(c["conf"]) + 0.18
+                and t_area >= 1.25 * max(c_area, 1.0)
+            )
+            kept.append(t if truck_wins else c)
+        else:
+            kept.append(best)
+    return kept
+
+
 class OfflineYOLOVehicleDetector:
     """
     YOLOv8-nano + ByteTrack for vehicles.
@@ -190,18 +272,33 @@ class OfflineYOLOVehicleDetector:
         try:
             yolo_frame, full_h, full_w = _yolo_view(frame)
             tracker = _TRACKER_YAML if os.path.isfile(_TRACKER_YAML) else "bytetrack.yaml"
-            results = self.model.track(
-                yolo_frame,
-                persist=True,
-                imgsz=self.imgsz,
-                tracker=tracker,
-                classes=list(VEHICLE_CLASSES.keys()),
-                verbose=False,
-                conf=self.conf_thresh,
-                iou=0.50,
-            )[0]
+            try:
+                results = self.model.track(
+                    yolo_frame,
+                    persist=True,
+                    imgsz=self.imgsz,
+                    tracker=tracker,
+                    classes=list(VEHICLE_CLASSES.keys()),
+                    verbose=False,
+                    conf=self.conf_thresh,
+                    iou=0.50,
+                    agnostic_nms=True,
+                )[0]
+            except TypeError:
+                results = self.model.track(
+                    yolo_frame,
+                    persist=True,
+                    imgsz=self.imgsz,
+                    tracker=tracker,
+                    classes=list(VEHICLE_CLASSES.keys()),
+                    verbose=False,
+                    conf=self.conf_thresh,
+                    iou=0.50,
+                )[0]
             detections = _drop_ego_hood(
-                self._recover_ids(self._parse_results(results)),
+                self._recover_ids(
+                    _dedupe_vehicle_boxes(self._parse_results(results))
+                ),
                 full_w,
                 full_h,
             )

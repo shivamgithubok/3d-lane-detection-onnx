@@ -368,7 +368,7 @@ class BEVWidget(QWidget):
         self.update()
 
     def update_bev_data(self, proposals, processed_objs=None, cipo_status="SAFE", left_3d=None,
-                        right_3d=None, speed_mps=None, dt=1.0 / 30.0):
+                        right_3d=None,         speed_mps=None, dt=1.0 / 30.0, alerts=None):
         """Receives new frame BEV data and triggers UI render update."""
         self.proposals = proposals if proposals is not None else []
         # Trust depth-model X/Z as-is (no artificial lateral nudging)

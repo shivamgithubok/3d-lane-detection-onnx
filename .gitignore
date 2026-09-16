@@ -40,7 +40,7 @@ scripts/build_openlane1000_notebook.py
 scripts/patch_mmcv_sanity_cell.py
 scripts/analyze_bev_frames.py
 models/*.engine
-models/*.onnx
+# models/*.onnx
 models/*.pt
 *__pycache__
 src/inference/__pycache__
@@ -51,3 +51,5 @@ scripts/debug/lane_param_sweep.py
 models/calib
 models/monocular_depth.engine
 models/midas_small.onnx
+*.json
+*.MP4

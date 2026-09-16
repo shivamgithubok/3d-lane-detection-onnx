@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-import onnxruntime as ort
+import math
 import time
 import sys
 import os
@@ -15,6 +15,7 @@ from src.utils.visualization import draw_bev
 from src.utils.drivable_area import get_ego_corridor_2d_pixels
 from src.tracking.lane_association import LaneTrackerManager
 from src.tracking.road_state import RoadStateEstimator
+from src.tracking.ego_pose import EgoPose, kappa_from_corridor
 from src.utils.ego_speed import EgoSpeedLog
 
 MODEL_PATH = "models/anchor3dlane_raw.onnx"
@@ -70,6 +71,7 @@ def load_lane_backend(force_onnx=False):
         print(f"Lane backend: TensorRT ({ENGINE_PATH})")
         return infer
 
+    import onnxruntime as ort
     providers = ort.get_available_providers()
     print("Available execution providers:", providers)
     sess = ort.InferenceSession(MODEL_PATH, providers=providers)
@@ -170,13 +172,15 @@ def main():
     if args.save:
         os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        writer = cv2.VideoWriter(args.output, fourcc, source_fps if source_fps > 1 else 30.0, (960, 720))
+        writer = cv2.VideoWriter(args.output, fourcc, source_fps if source_fps > 1 else 30.0, (1440, 720))
 
     frame_count = 0
     fps_history = []
     ekf_time_history = []
     stats_on = {"CONFIRMED": 0, "PREDICTED": 0, "UNKNOWN": 0, "onesided": 0, "corridor": 0}
     stats_off = {"CONFIRMED": 0, "PREDICTED": 0, "UNKNOWN": 0, "onesided": 0, "corridor": 0}
+
+    ego_pose = EgoPose()
 
     onesided_on = bool(lane_cfg.ENABLE_ONESIDED_RECONSTRUCT)
     print(
@@ -204,7 +208,7 @@ def main():
         t_ekf_start = time.perf_counter()
         road_state = None
         compare_state = None
-        speed_mps = speed_log.get_mps(frame_count) if speed_log is not None else None
+        speed_mps = speed_log.get_mps(frame_count, min_mps=0.0) if speed_log is not None else None
         if use_ekf and road_state_estimator is not None:
             if args.compare and compare_estimator is not None:
                 prev_flag = bool(lane_cfg.ENABLE_ONESIDED_RECONSTRUCT)
@@ -254,6 +258,13 @@ def main():
                 front_annotated = draw_lanes(
                     front_annotated, [recon_lane], color=(0, 165, 255), thickness=2
                 )
+        kappa = None
+        left_c = getattr(road_state, "left_corridor_3d", None) if road_state is not None else None
+        right_c = getattr(road_state, "right_corridor_3d", None) if road_state is not None else None
+        if left_c is not None and right_c is not None:
+            kappa = kappa_from_corridor(left_c, right_c)
+        ego_pose.update(dt, speed_mps, kappa=kappa)
+
         if road_state is not None and road_state.has_valid_corridor:
             poly = get_ego_corridor_2d_pixels(
                 active_lanes,
@@ -276,11 +287,21 @@ def main():
                 left_corridor_3d=road_state.left_corridor_3d,
                 right_corridor_3d=road_state.right_corridor_3d,
                 allow_auto_corridor=False,
+                speed_mps=speed_mps,
+                yaw_rate=ego_pose.yaw_rate,
             )
         else:
-            bev = draw_bev(active_lanes, ANCHOR_Y_STEPS, allow_auto_corridor=False)
+            bev = draw_bev(
+                active_lanes,
+                ANCHOR_Y_STEPS,
+                allow_auto_corridor=False,
+                speed_mps=speed_mps,
+                yaw_rate=ego_pose.yaw_rate,
+            )
 
         display_frame = cv2.resize(front_annotated, (960, 720))
+        bev_show = cv2.resize(bev, (480, 720))
+        display_frame = np.hstack([display_frame, bev_show])
         if road_state is not None:
             status = road_state.status
             src = road_state.source
@@ -299,6 +320,16 @@ def main():
         n_lanes = len(active_lanes) if active_lanes is not None else 0
         cv2.putText(display_frame, f"Active Lanes: {n_lanes}",
                     (20, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(
+            display_frame,
+            f"turn {math.degrees(ego_pose.yaw_rate):+.1f} deg/s  k={ego_pose.kappa:+.4f}/m",
+            (20, 150),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 200, 255),
+            2,
+            cv2.LINE_AA,
+        )
 
         if writer is not None:
             writer.write(display_frame)
@@ -318,6 +349,7 @@ def main():
             src = road_state.source if road_state is not None else "-"
             print(
                 f"Frame {frame_count:4d} | FPS: {avg_fps:.1f} | {st}/{src} | "
+                f"turn {math.degrees(ego_pose.yaw_rate):+.1f} deg/s | "
                 f"Active Lanes: {len(active_lanes) if active_lanes is not None else 0}"
             )
         if args.max_frames and frame_count >= args.max_frames:

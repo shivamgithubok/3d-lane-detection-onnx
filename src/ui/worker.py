@@ -15,6 +15,15 @@ from src.inference.postprocess import postprocess_onnx_output
 from src.inference.lane_preprocess import prepare_lane_input
 from src.inference.cipo_tracker import CIPOTracker
 from src.inference.object_detector import OfflineYOLOVehicleDetector
+from src.inference.speed_limit_tracker import SpeedLimitTracker
+from src.inference.traffic_sign_detector import (
+    TrafficSignDetector,
+    draw_isa_overlay,
+    filter_sign_dets,
+    resolve_model_path,
+)
+from src.inference.lprnet import LPRNetRecognizer, annotate_speed_dets, default_paths as lpr_paths
+from src.inference.ldw_fcw import AdasWarningTracker, draw_adas_alerts
 from src.utils.split_visualization import draw_front_view_cipo
 from src.utils.camera_transform import CameraTransform
 from src.tracking.road_state import RoadStateEstimator
@@ -37,9 +46,9 @@ def preprocess_frame(frame):
 
 class InferenceWorker(QThread):
     # Signal emitted to UI: frame_rgb, proposals, processed_objs, cipo_obj, cipo_status,
-    # left_3d, right_3d, avg_fps, latency_ms, speed_mps, source_dt
+    # left_3d, right_3d, avg_fps, latency_ms, speed_mps, source_dt, alerts
     # speed_mps / source_dt drive the lane-anchored BEV: the road scrolls by v*dt.
-    frame_processed = Signal(np.ndarray, list, list, object, str, object, object, float, float, object, float)
+    frame_processed = Signal(np.ndarray, list, list, object, str, object, object, float, float, object, float, object)
     status_message = Signal(str)
 
     def __init__(self, video_path=None, model_path="models/anchor3dlane_raw.engine", parent=None):
@@ -47,10 +56,19 @@ class InferenceWorker(QThread):
         self.video_path = video_path
         self.engine_path = model_path if model_path.endswith('.engine') else "models/anchor3dlane_raw.engine"
         self.yolo_engine_path = "models/yolov8n.engine"
+        self.sign_engine_path = "models/traffic_sign_yolo11n.engine"
+        self.lpr_engine_path = "models/us_lprnet_baseline18.engine"
         self.running = False
         self.paused = False
         # YOLO is created on the worker thread after CUDA is ready (avoids empty/missed frames)
         self.detector = None
+        self.sign_detector = None
+        self.lpr = None
+        self.isa = SpeedLimitTracker(confirm_hits=3, act_conf=0.55)
+        self._sign_every = 4
+        self._last_sign_dets = []
+        self._isa_use_class = True
+        self.alerts = AdasWarningTracker()
         # P is LOCKED to OpenLane training extrinsics. Retuning pitch (e.g. Garmin -6°)
         # shears the front corridor vs cyan lanes — model 3D assumes this camera.
         pitch, height = preset_for_video(video_path)
@@ -153,6 +171,14 @@ class InferenceWorker(QThread):
                         model_path=yolo_path, conf_thresh=0.22, imgsz=640
                     )
                     detector = self.detector
+                    sign_path = resolve_model_path(self.sign_engine_path)
+                    if sign_path:
+                        self.sign_detector = TrafficSignDetector(
+                            model_path=sign_path, conf_thresh=0.35
+                        )
+                        self.status_message.emit(f"Traffic-sign engine: {sign_path}")
+                    else:
+                        self.sign_detector = None
                 except Exception as ye:
                     self.status_message.emit(f"YOLO init warning: {ye}")
                     self.detector = None
@@ -162,6 +188,21 @@ class InferenceWorker(QThread):
                         cuda_ctx.push()
                     except Exception:
                         pass
+
+                # 2b. LPRNet on the lane pycuda context (YOLO only gave the box)
+                self.lpr = None
+                self._isa_use_class = True
+                lpr_path = self.lpr_engine_path
+                if not os.path.isfile(lpr_path):
+                    lpr_path = lpr_paths()["engine"]
+                if os.path.isfile(lpr_path):
+                    try:
+                        self.lpr = LPRNetRecognizer(engine_path=lpr_path)
+                        self._isa_use_class = False
+                        self.status_message.emit(f"LPRNet engine: {lpr_path}")
+                    except Exception as le:
+                        self.lpr = None
+                        self.status_message.emit(f"LPRNet init warning: {le}")
 
                 # 3. CIPO tracker: OpenLane P for lanes, measured calib for objects
                 tracker = CIPOTracker(
@@ -220,6 +261,12 @@ class InferenceWorker(QThread):
                 ego_left, ego_right = None, None
                 left_3d, right_3d = None, None
                 speed_mps = None
+                alerts_snap = {
+                    "ldw": "OFF",
+                    "fcw": "OFF",
+                    "priority": "none",
+                    "ldw_side": None,
+                }
 
                 if frame is not None and use_trt:
                     # Step A: 3D Lane TensorRT Inference
@@ -236,7 +283,10 @@ class InferenceWorker(QThread):
                     raw_proposals, scores = postprocess_onnx_output(
                         h_reg_proposals, conf_threshold=prep_meta["conf"]
                     )
-                    speed_mps = speed_log.get_mps(frame_i) if speed_log is not None else None
+                    speed_mps = (
+                        speed_log.get_mps(frame_i, min_mps=0.0)
+                        if speed_log is not None else None
+                    )
                     road_state = road_state_estimator.update(
                         raw_proposals, dt=source_dt, speed_mps=speed_mps
                     )
@@ -252,14 +302,32 @@ class InferenceWorker(QThread):
                             cuda_ctx.pop()
                         except Exception:
                             pass
+                    ran_sign = False
                     try:
                         raw_detections = detector.detect(frame) if detector else []
+                        if self.sign_detector is not None and (frame_i % self._sign_every) == 0:
+                            sign_dets, _ = self.sign_detector.detect(frame)
+                            sign_dets = filter_sign_dets(sign_dets, frame.shape)
+                            self._last_sign_dets = sign_dets
+                            ran_sign = True
                     finally:
                         if cuda_ctx is not None:
                             try:
                                 cuda_ctx.push()
                             except Exception:
                                 pass
+
+                    if self.sign_detector is not None:
+                        if ran_sign:
+                            if self.lpr is not None and self._last_sign_dets:
+                                annotate_speed_dets(frame, self._last_sign_dets, self.lpr)
+                            self.isa.update(
+                                self._last_sign_dets,
+                                ran_infer=True,
+                                use_class=self._isa_use_class,
+                            )
+                        else:
+                            self.isa.update([], ran_infer=False, use_class=self._isa_use_class)
 
                     # Step C: CIPO Tracker & 3D In-Path Association
                     h_frame, w_frame = frame.shape[:2]
@@ -287,6 +355,16 @@ class InferenceWorker(QThread):
                         )
                         cipo_status = tracker.last_cipo_status
 
+                    alerts_snap = self.alerts.update(
+                        ego_left,
+                        ego_right,
+                        road_state.status,
+                        cipo_obj,
+                        cipo_status,
+                        speed_mps,
+                        dt=source_dt,
+                    )
+
                 # Step D: All rendering reads the same validated temporal road state.
                 if frame is None or not use_trt:
                     left_3d, right_3d = None, None
@@ -306,6 +384,25 @@ class InferenceWorker(QThread):
                         road_state_valid=(left_3d is not None and right_3d is not None),
                         left_corridor_3d=left_3d,
                         right_corridor_3d=right_3d,
+                    )
+                    if self.sign_detector is not None:
+                        ego_mph = None
+                        if speed_log is not None:
+                            ego_mph = speed_log.get_mph(frame_i)
+                        annotated_frame = draw_isa_overlay(
+                            annotated_frame,
+                            self.isa.snapshot(),
+                            ego_mph=ego_mph,
+                            detections=self._last_sign_dets,
+                        )
+                    annotated_frame = draw_adas_alerts(
+                        annotated_frame,
+                        alerts_snap,
+                        ego_left=ego_left,
+                        ego_right=ego_right,
+                        P_matrix=np.asarray(self.P_matrix, dtype=np.float64),
+                        frame_transform=frame_transform,
+                        cipo_obj=cipo_obj,
                     )
                     frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
                     # Downscale for UI transfer/paint (keeps HUD readable, cuts Qt cost)
@@ -329,7 +426,7 @@ class InferenceWorker(QThread):
                 # Emit signal to GUI
                 self.frame_processed.emit(
                     frame_rgb, proposals, processed_objs, cipo_obj, cipo_status, left_3d, right_3d,
-                    avg_fps, latency_ms, speed_mps, float(source_dt)
+                    avg_fps, latency_ms, speed_mps, float(source_dt), alerts_snap
                 )
 
                 frame_i += 1
@@ -357,6 +454,12 @@ class InferenceWorker(QThread):
                     del d_reg_proposals
                 if 'd_anchors' in locals() and d_anchors is not None:
                     del d_anchors
+                if hasattr(self, "lpr") and self.lpr is not None:
+                    try:
+                        self.lpr.close()
+                    except Exception:
+                        pass
+                    self.lpr = None
                 if hasattr(self, 'detector') and self.detector is not None:
                     # Clean up the YOLO model and its associated CUDA states if possible
                     if hasattr(self.detector, 'model') and self.detector.model is not None:

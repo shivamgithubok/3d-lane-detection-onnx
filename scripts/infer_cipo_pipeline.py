@@ -112,6 +112,11 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
     n_corr = 0
     n_inpath = 0
     n_bev3 = 0
+    n_inpath_not_ego = 0
+    n_cipo = 0
+    still_at = {60, 150, 240, 380}
+    still_dir = os.path.join(os.path.dirname(output_path) or "output", "lane_assign_stills")
+    os.makedirs(still_dir, exist_ok=True)
 
     print("[Pipeline] Starting inference loop...")
     while cap.isOpened():
@@ -196,8 +201,12 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
             lane_hist[li] = lane_hist.get(li, 0) + 1
             if o.get("in_path"):
                 n_inpath += 1
+                if int(o.get("lane_index", 0)) != 0:
+                    n_inpath_not_ego += 1
             if abs(li) <= 1:
                 n_bev3 += 1
+        if cipo_obj is not None:
+            n_cipo += 1
 
         # Step F: Render 3-Panel Split Window (Front View + BEV + HUD)
         front_view = draw_front_view_cipo(
@@ -226,6 +235,19 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
 
         if writer is not None:
             writer.write(split_canvas)
+
+        if frame_idx in still_at:
+            still_path = os.path.join(still_dir, f"frame_{frame_idx:04d}.jpg")
+            cv2.imwrite(still_path, split_canvas)
+            bits = []
+            for o in processed_objs:
+                bits.append(
+                    f"#{o.get('track_id', -1)} L{int(o.get('lane_index', 99)):+d} "
+                    f"Z={o.get('Z_3d', 0):.1f} off={o.get('lane_offset_m', 0):.2f} "
+                    f"{'IN' if o.get('in_path') else 'out'}"
+                    f"{' CIPO' if o.get('is_cipo') else ''}"
+                )
+            print(f" [still {frame_idx}] " + (" | ".join(bits) if bits else "no objects"))
 
         if show_gui:
             try:
@@ -263,6 +285,8 @@ def run_cipo_pipeline(video_path=DEFAULT_VIDEO_PATH, output_path=OUTPUT_VIDEO_PA
     print(f" Corridor frames:        {n_corr}/{frame_idx}")
     print(f" Lane index counts:      {dict(sorted(lane_hist.items()))}")
     print(f" in_path objects:        {n_inpath}   BEV 3-lane objects: {n_bev3}")
+    print(f" in_path but not ego:    {n_inpath_not_ego}   CIPO frames: {n_cipo}")
+    print(f" Stills:                 {still_dir}")
     print(f" Annotated Output Video: {output_path}")
     print("================================================================\n")
 

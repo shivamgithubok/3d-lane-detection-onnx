@@ -19,6 +19,50 @@ _ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
 _MPH_TEMPLATE_PATH = os.path.join(_ASSET_DIR, "garmin_hud_mph.png")
 
 
+def detect_hud_top(frame: np.ndarray) -> int:
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+    return _hud_top(gray)
+
+
+def crop_garmin_hud(frame: np.ndarray, hood_frac: float = 0.08, hud_top: Optional[int] = None):
+    """Remove the Garmin bottom bar and optional hood. Returns (crop, hud_y)."""
+    y0 = int(hud_top) if hud_top is not None else detect_hud_top(frame)
+    y0 = max(1, min(int(y0), frame.shape[0] - 1))
+    content = frame[:y0]
+    if hood_frac > 0:
+        cut = int(content.shape[0] * (1.0 - float(hood_frac)))
+        content = content[: max(cut, 1)]
+    return content, y0
+
+
+def export_nohud_video(src: str, dst: str, hood_frac: float = 0.08):
+    cap = cv2.VideoCapture(src)
+    if not cap.isOpened():
+        raise FileNotFoundError(src)
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
+    ok, frame0 = cap.read()
+    if not ok:
+        cap.release()
+        raise RuntimeError(f"Cannot read {src}")
+    crop0, hud_y = crop_garmin_hud(frame0, hood_frac=hood_frac)
+    ch, cw = crop0.shape[:2]
+    writer = cv2.VideoWriter(dst, cv2.VideoWriter_fourcc(*"mp4v"), fps, (cw, ch))
+    writer.write(crop0)
+    n = 1
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        crop, _ = crop_garmin_hud(frame, hood_frac=hood_frac, hud_top=hud_y)
+        if crop.shape[0] != ch or crop.shape[1] != cw:
+            crop = cv2.resize(crop, (cw, ch))
+        writer.write(crop)
+        n += 1
+    cap.release()
+    writer.release()
+    return n, (cw, ch), hud_y
+
+
 def _hud_top(gray: np.ndarray) -> int:
     h = gray.shape[0]
     rows = []
@@ -32,12 +76,28 @@ def _hud_top(gray: np.ndarray) -> int:
     return int(min(rows))
 
 
+_MPH_TMPL_H = None
+
+
+def _mph_template_height() -> int:
+    """Native HUD row count. Scaling the MPH glyph to a taller hood-crop kills NCC."""
+    global _MPH_TMPL_H
+    if _MPH_TMPL_H is None:
+        img = cv2.imread(_MPH_TEMPLATE_PATH, cv2.IMREAD_GRAYSCALE) if os.path.isfile(_MPH_TEMPLATE_PATH) else None
+        _MPH_TMPL_H = int(img.shape[0]) if img is not None and img.size else 37
+    return int(_MPH_TMPL_H)
+
+
 def _hud_bar(gray: np.ndarray) -> np.ndarray:
     """Bottom Garmin overlay only — do not eat the dark hood as HUD."""
     h = gray.shape[0]
     y0 = _hud_top(gray)
     y0 = max(int(y0), h - 42)
-    return gray[y0:]
+    bar = gray[y0:]
+    th = _mph_template_height()
+    if bar.shape[0] > th:
+        bar = bar[-th:]
+    return bar
 
 
 def _load_digit_templates():
@@ -327,10 +387,23 @@ class EgoSpeedLog:
             return None
         return cls.from_json(path)
 
-    def get_mps(self, frame_index: int) -> Optional[float]:
+    def get_mph(self, frame_index: int) -> Optional[int]:
         if frame_index < 0 or frame_index >= len(self.mps):
             return None
         v = self.mps[frame_index]
-        if v is None or v < 0.3:
+        if v is None:
+            return None
+        return int(round(float(v) / MPH_TO_MPS))
+
+    def get_mps(self, frame_index: int, min_mps: float = 0.3) -> Optional[float]:
+        """Metres per second at this frame.
+
+        `min_mps=0` keeps a true stop as 0.0 (needed for world-frame heading).
+        The default 0.3 still treats a parked log as 'no speed' for dash scroll.
+        """
+        if frame_index < 0 or frame_index >= len(self.mps):
+            return None
+        v = self.mps[frame_index]
+        if v is None or v < float(min_mps):
             return None
         return float(v)

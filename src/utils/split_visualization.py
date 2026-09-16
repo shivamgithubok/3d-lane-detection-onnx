@@ -4,9 +4,9 @@ import sys
 import os
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-from src.utils.visualization import draw_bev
+from src.utils.visualization import draw_bev, world_to_canvas
 from src.inference.postprocess import ANCHOR_Y_STEPS, decode_lane_pixels
-from src.utils.drivable_area import extract_ego_corridor_3d, get_ego_corridor_2d_pixels, get_ego_corridor_sides_2d, fill_missing_lane_gaps, find_ego_lanes, parse_lane_components, parse_lane_components
+from src.utils.drivable_area import extract_ego_corridor_3d, get_ego_corridor_2d_pixels, get_ego_corridor_sides_2d, fill_missing_lane_gaps, find_ego_lanes, parse_lane_components, parse_lane_components, STANDARD_LANE_WIDTH
 from src.utils.draw_3d_box import draw_3d_wireframe_box
 
 
@@ -14,7 +14,7 @@ from src.utils.draw_3d_box import draw_3d_wireframe_box
 # PROFESSIONAL 2D DETECTION BOX RENDERER
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _draw_pro_detection_box(img, overlay, x1, y1, x2, y2, track_id, label, dist_m, color, is_cipo=False):
+def _draw_pro_detection_box(img, overlay, x1, y1, x2, y2, track_id, label, dist_m, color, is_cipo=False, lane_index=None):
     """
     Thin 2D detection box:
       • 1px outline only (no fill / glow over the vehicle)
@@ -55,7 +55,12 @@ def _draw_pro_detection_box(img, overlay, x1, y1, x2, y2, track_id, label, dist_
 
     id_str = f"#{track_id:02d}" if (track_id is not None and track_id > 0) else "#--"
     row1   = f" {id_str}  {cls_icon} {cls_code} "
-    row2   = f"  {dist_m:.1f} m  "
+    if lane_index is None or abs(int(lane_index)) > 2:
+        row2 = f"  {dist_m:.1f} m  "
+    else:
+        li = int(lane_index)
+        tag = "EGO" if li == 0 else f"L{li:+d}"
+        row2 = f"  {dist_m:.1f} m {tag} "
 
     font_r1 = cv2.FONT_HERSHEY_DUPLEX
     font_r2 = cv2.FONT_HERSHEY_SIMPLEX
@@ -231,6 +236,7 @@ def draw_front_view_cipo(
             dist_m=dist_m,
             color=color,
             is_cipo=is_cipo,
+            lane_index=obj.get("lane_index"),
         )
 
     # ── 3. SINGLE PASS ALPHA BLEND FOR ALL OVERLAYS ───────────────────────
@@ -312,13 +318,15 @@ def draw_bev_cipo(
     h_bev, w_bev = bev.shape[:2]
 
     def world_to_bev_px(x, y):
-        px = int((x - (-8.0)) / (8.0 - (-8.0)) * w_bev)
-        py = int(h_bev - (y - 0.0) / (80.0 - 0.0) * (h_bev - 60) - 40)
-        return px, py
+        return world_to_canvas(x, y)
 
     for obj in objects:
-        x_3d = obj['X_3d']
         y_3d = obj['Z_3d']
+        li = obj.get("lane_index")
+        if li is not None and abs(int(li)) <= 2:
+            x_3d = float(li) * STANDARD_LANE_WIDTH + float(obj.get("lane_offset_m", 0.0))
+        else:
+            x_3d = obj['X_3d']
         if 0 < y_3d <= 80.0:
             px, py = world_to_bev_px(x_3d, y_3d)
             if 0 <= px < w_bev and 0 <= py < h_bev:
