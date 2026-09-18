@@ -20,6 +20,7 @@ Item {
     property bool showLaneLines: true
     property bool scenicView: false
     property bool showCalib: false
+    property bool clusterChrome: false
     // Metric debug overlay: ego centreline, 10 m ruler ticks, per-object (x, z)
     // labels in metres. Toggle from Python via _set("debugMetric", True).
     property bool debugMetric: false
@@ -63,9 +64,9 @@ Item {
     property string fcwLevel: "OFF"
     readonly property color cipoGlow: cipoStatus === "DANGER" ? "#e23a3c"
                                      : (cipoStatus === "WARNING" ? "#e09a20" : "#3ec8ff")
-    readonly property color corridorColor: cipoStatus === "DANGER" ? Qt.rgba(0.95, 0.18, 0.32, 0.80)
-                                     : (cipoStatus === "WARNING" ? Qt.rgba(1.0, 0.72, 0.08, 0.78)
-                                                                 : Qt.rgba(0.76, 0.93, 0.14, 0.82))
+    readonly property color corridorColor: cipoStatus === "DANGER" ? Qt.rgba(0.95, 0.18, 0.32, 0.72)
+                                     : (cipoStatus === "WARNING" ? Qt.rgba(1.0, 0.72, 0.08, 0.70)
+                                                                 : Qt.rgba(0.24, 0.78, 1.0, 0.55))
     property string overlayHint: "Phase 2 — loading GLB"
     property url egoGltf: ""
     property url skodaGltf: ""
@@ -715,17 +716,17 @@ Item {
                     metalness: 0.0
                 }
             }
-            // BMW-style perspective grid on the pavement.
+            // Cluster HUD grid — sparse cyan (keep cheap on Orin).
             Repeater3D {
-                model: 16
+                model: 12
                 Model {
                     source: "#Cube"
-                    position: Qt.vector3d(0, 0.02, 6.0 - index * 6.0)
-                    scale: Qt.vector3d(0.12, 0.00008, 0.00018)
+                    position: Qt.vector3d(0, 0.025, 6.0 - index * 6.5)
+                    scale: Qt.vector3d(0.12, 0.00008, 0.0002)
                     materials: PrincipledMaterial {
                         lighting: PrincipledMaterial.NoLighting
-                        baseColor: "#2a4a62"
-                        opacity: 0.28
+                        baseColor: "#3ec8ff"
+                        opacity: 0.34
                         alphaMode: PrincipledMaterial.Blend
                     }
                 }
@@ -734,12 +735,12 @@ Item {
                 model: 7
                 Model {
                     source: "#Cube"
-                    position: Qt.vector3d((index - 3) * 2.0, 0.02, -38)
-                    scale: Qt.vector3d(0.00016, 0.00008, 0.90)
+                    position: Qt.vector3d((index - 3) * 2.0, 0.025, -38)
+                    scale: Qt.vector3d(0.00014, 0.00008, 0.90)
                     materials: PrincipledMaterial {
                         lighting: PrincipledMaterial.NoLighting
-                        baseColor: "#2a4a62"
-                        opacity: 0.22
+                        baseColor: "#3ec8ff"
+                        opacity: 0.26
                         alphaMode: PrincipledMaterial.Blend
                     }
                 }
@@ -829,7 +830,7 @@ Item {
                 materials: PrincipledMaterial {
                     lighting: PrincipledMaterial.NoLighting
                     baseColor: root.corridorColor
-                    opacity: 0.78
+                    opacity: 0.52
                     alphaMode: PrincipledMaterial.Blend
                 }
             }
@@ -1063,7 +1064,7 @@ Item {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        anchors.bottom: toolbar.top
+        anchors.bottom: toolbar.visible ? toolbar.top : parent.bottom
         acceptedButtons: Qt.LeftButton | Qt.RightButton
         hoverEnabled: true
         property real lastX: 0
@@ -1124,6 +1125,7 @@ Item {
     }
 
     Column {
+        visible: !root.clusterChrome
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.margins: 8
@@ -1209,6 +1211,7 @@ Item {
 
     Rectangle {
         id: toolbar
+        visible: !root.clusterChrome
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom

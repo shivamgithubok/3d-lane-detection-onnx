@@ -1,36 +1,33 @@
 """
 PySide6 Main ADAS Cockpit Window
-Split-screen Front Camera + Dynamic BEV Canvas + Extrinsics Control Panel.
+Hexagonal infotainment cluster: BEV / live camera + HUD chrome.
 """
 
-import sys
 import numpy as np
-from PySide6.QtCore import Qt, Slot, QSize
+from PySide6.QtCore import Slot
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QSplitter, QStatusBar, QFrame, QFileDialog
+    QMainWindow, QWidget, QVBoxLayout, QFileDialog, QStatusBar
 )
-from PySide6.QtGui import QImage, QPixmap, QFont, QIcon
+from PySide6.QtGui import QImage, QPixmap
 
 from src.ui.worker import InferenceWorker
 from src.ui.bev_quick3d import BevQuick3DWidget, create_bev_widget
 from src.ui.calibration_panel import CalibrationPanel
+from src.ui.hex_cockpit import WINDOW_H, WINDOW_W, HexCockpit
 from src.utils.calibration import preset_for_video
 
 class ADASMainWindow(QMainWindow):
     def __init__(self, video_path=None, model_path="models/anchor3dlane_raw.engine", bev_backend="quick3d"):
 
         super().__init__()
-        self.setWindowTitle("Futuristic 3D Lane & ADAS Cockpit (PySide6)")
-        self.resize(1280, 800)
-        self.setMinimumSize(960, 600)
+        self.setWindowTitle("ADAS Infotainment Cluster")
+        self.setFixedSize(WINDOW_W, WINDOW_H)
 
         self.video_path = video_path
         self.model_path = model_path
         self.bev_backend = bev_backend
         self.preset_pitch, self.preset_height = preset_for_video(video_path)
 
-        # Setup Theme & Layout
         self.apply_dark_theme()
         self.init_ui()
 
@@ -52,49 +49,18 @@ class ADASMainWindow(QMainWindow):
         )
 
     def apply_dark_theme(self):
-        """Applies a sleek, dark ADAS futuristic theme."""
         self.setStyleSheet("""
-            QMainWindow {
-                background-color: #0D1117;
-            }
-            QWidget {
-                color: #C9D1D9;
-                font-family: 'Inter', 'Segoe UI', sans-serif;
-            }
-            QFrame#header_bar {
-                background-color: #161B22;
-                border-bottom: 1px solid #30363D;
-            }
-            QLabel#title_label {
-                color: #58A6FF;
-                font-weight: bold;
-                font-size: 14px;
-            }
-            QLabel#hud_badge {
-                background-color: #21262D;
-                border: 1px solid #30363D;
-                border-radius: 4px;
-                padding: 4px 10px;
-                font-size: 11px;
-                font-weight: bold;
-            }
+            QMainWindow { background-color: #050A14; }
+            QWidget { color: #C9D1D9; font-family: 'Inter', 'Segoe UI', sans-serif; }
             QPushButton#ctrl_btn {
-                background-color: #21262D;
-                color: #C9D1D9;
-                border: 1px solid #30363D;
-                border-radius: 3px;
-                padding: 2px 8px;
-                font-size: 11px;
+                background-color: #101A28; color: #C8E8FF;
+                border: 1px solid #2A4A62; border-radius: 3px;
+                padding: 2px 8px; font-size: 11px;
             }
-            QPushButton#ctrl_btn:hover {
-                background-color: #30363D;
-                border-color: #58A6FF;
-                color: #FFFFFF;
-            }
+            QPushButton#ctrl_btn:hover { border-color: #3EC8FF; }
             QStatusBar {
-                background-color: #161B22;
-                color: #8B949E;
-                border-top: 1px solid #30363D;
+                background-color: #050A14; color: #7A93A8;
+                border-top: 1px solid #1A3048;
             }
         """)
 
@@ -105,215 +71,60 @@ class ADASMainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # 1. Header Navigation Bar
-        header = QFrame()
-        header.setObjectName("header_bar")
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(12, 4, 12, 4)
+        self.bev_widget = create_bev_widget(self.bev_backend)
+        if isinstance(self.bev_widget, BevQuick3DWidget):
+            self.bev_widget.enable_cluster_chrome()
 
-        lbl_title = QLabel("🛣️ 3D LANE DETECTION & BEV ADAS VISUALIZER")
-        lbl_title.setObjectName("title_label")
-        header_layout.addWidget(lbl_title)
-
-        header_layout.addStretch()
-
-        # Telemetry HUD Badges
-        self.lbl_fps = QLabel("FPS: --")
-        self.lbl_fps.setObjectName("hud_badge")
-        self.lbl_latency = QLabel("Latency: -- ms")
-        self.lbl_latency.setObjectName("hud_badge")
-        self.lbl_status_hud = QLabel("Status: INITIALIZING")
-        self.lbl_status_hud.setObjectName("hud_badge")
-        self.lbl_ldw = QLabel("LDW")
-        self.lbl_ldw.setObjectName("hud_badge")
-        self.lbl_fcw = QLabel("FCW")
-        self.lbl_fcw.setObjectName("hud_badge")
-
-        header_layout.addWidget(self.lbl_fps)
-        header_layout.addWidget(self.lbl_latency)
-        header_layout.addWidget(self.lbl_status_hud)
-        header_layout.addWidget(self.lbl_ldw)
-        header_layout.addWidget(self.lbl_fcw)
-
-        main_layout.addWidget(header)
-
-        # 2. Main Viewports Splitter
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.setHandleWidth(2)
-        splitter.setStyleSheet("QSplitter::handle { background-color: #30363D; }")
-
-        # Left Container: Front Camera Feed & Video Controls
-        left_container = QWidget()
-        left_layout = QVBoxLayout(left_container)
-        left_layout.setContentsMargins(10, 10, 5, 10)
-
-        # Camera Frame Label
-        self.lbl_camera = QLabel("Camera Feed Loading...")
-        self.lbl_camera.setAlignment(Qt.AlignCenter)
-        self.lbl_camera.setStyleSheet("background-color: #000000; border: 1px solid #21262D; border-radius: 6px;")
-        self.lbl_camera.setMinimumSize(480, 360)
-        self.lbl_camera.setScaledContents(True)
-        left_layout.addWidget(self.lbl_camera, stretch=1)
-
-
-        # Video Control Buttons
-        ctrl_layout = QHBoxLayout()
-        self.btn_play = QPushButton("⏸ Pause")
-        self.btn_play.setObjectName("ctrl_btn")
+        self.cockpit = HexCockpit(self.bev_widget)
+        self.lbl_camera = self.cockpit.lbl_camera
+        self.btn_play = self.cockpit.btn_play
+        self.btn_open_video = self.cockpit.btn_open
         self.btn_play.clicked.connect(self.toggle_play_pause)
-
-        self.btn_open_video = QPushButton("📁 Open Video")
-        self.btn_open_video.setObjectName("ctrl_btn")
         self.btn_open_video.clicked.connect(self.open_video_file)
 
-        ctrl_layout.addWidget(self.btn_play)
-        ctrl_layout.addWidget(self.btn_open_video)
-        ctrl_layout.addStretch()
-        left_layout.addLayout(ctrl_layout)
-
-        splitter.addWidget(left_container)
-
-        # Right Container: BEV Canvas & Extrinsics Calibration Panel
-        right_container = QWidget()
-        right_layout = QVBoxLayout(right_container)
-        right_layout.setContentsMargins(4, 4, 8, 4)
-        right_layout.setSpacing(0)
-
-        # Interactive BEV Widget (Qt Quick 3D or QPainter fallback)
-        self.bev_widget = create_bev_widget(self.bev_backend)
-        right_layout.addWidget(self.bev_widget, stretch=1)
-
-        self.btn_road_style = None
-        self.btn_lane_lines = None
-        self.btn_scenic = None
-        # Always show extrinsics (P2) — drives front P_matrix + BEV camera
-        bev_ctrl_layout = QHBoxLayout()
-        if isinstance(self.bev_widget, BevQuick3DWidget):
-            self.btn_scenic = QPushButton("View: Road")
-            self.btn_scenic.setObjectName("ctrl_btn")
-            self.btn_scenic.setToolTip("Scene: sky, grass, mountains. Road: one-color pavement only.")
-            self.btn_scenic.clicked.connect(self.toggle_scenic_view)
-            bev_ctrl_layout.addWidget(self.btn_scenic)
-        if not isinstance(self.bev_widget, BevQuick3DWidget):
-            btn_reset_bev = QPushButton("Reset BEV")
-            btn_reset_bev.setObjectName("ctrl_btn")
-            btn_reset_bev.clicked.connect(self.bev_widget.reset_view)
-            bev_ctrl_layout.addWidget(btn_reset_bev)
-            self.btn_road_style = QPushButton("Road: Cinematic")
-            self.btn_road_style.setObjectName("ctrl_btn")
-            self.btn_road_style.clicked.connect(self.toggle_road_style)
-            bev_ctrl_layout.addWidget(self.btn_road_style)
-            self.btn_lane_lines = QPushButton("Lanes: ON")
-            self.btn_lane_lines.setObjectName("ctrl_btn")
-            self.btn_lane_lines.setCheckable(True)
-            self.btn_lane_lines.setChecked(True)
-            self.btn_lane_lines.clicked.connect(self.toggle_lane_lines)
-            bev_ctrl_layout.addWidget(self.btn_lane_lines)
-        bev_ctrl_layout.addStretch()
         self.calib_panel = CalibrationPanel(
             pitch_deg=self.preset_pitch, height_m=self.preset_height
         )
-        bev_ctrl_layout.addWidget(self.calib_panel)
-        right_layout.addLayout(bev_ctrl_layout)
+        self.cockpit.mode_panel.layout().addWidget(self.calib_panel)
 
-        splitter.addWidget(right_container)
-        splitter.setSizes([640, 640])
+        main_layout.addWidget(self.cockpit, stretch=1)
 
-        main_layout.addWidget(splitter, stretch=1)
-
-        # 3. Status Bar
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("Ready. PySide6 Engine active.")
+        self.status_bar.hide()
 
     @Slot(np.ndarray, list, list, object, str, object, object, float, float, object, float, object)
     def on_frame_processed(self, frame_rgb, proposals, processed_objs, cipo_obj, cipo_status,
                            left_3d, right_3d, fps, latency_ms, speed_mps=None, source_dt=1.0 / 30.0,
                            alerts=None):
-        """Callback invoked when worker thread emits a newly processed frame."""
-        # 1. Update Camera Video Label
-        h, w, ch = frame_rgb.shape
-        bytes_per_line = ch * w
-        q_img = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(q_img)
-        self.lbl_camera.setPixmap(pixmap)
+        if self.cockpit._view == "live":
+            h, w, ch = frame_rgb.shape
+            bytes_per_line = ch * w
+            q_img = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            self.lbl_camera.setPixmap(QPixmap.fromImage(q_img))
 
-
-        # 2. Update BEV Canvas Widget
-        self.bev_widget.update_bev_data(
-            proposals, processed_objs, cipo_status, left_3d, right_3d,
-            speed_mps=speed_mps, dt=source_dt, alerts=alerts,
+        if self.cockpit._view == "bev":
+            self.bev_widget.update_bev_data(
+                proposals, processed_objs, cipo_status, left_3d, right_3d,
+                speed_mps=speed_mps, dt=source_dt, alerts=alerts,
+            )
+        self.cockpit.update_hud(
+            speed_mps=speed_mps,
+            cipo_obj=cipo_obj,
+            cipo_status=cipo_status,
+            alerts=alerts,
+            fps=fps,
+            lane_ok=(left_3d is not None and right_3d is not None),
         )
-
-        # 3. Update HUD Badges
-        self.lbl_fps.setText(f"FPS: {fps:.1f}")
-        self.lbl_latency.setText(f"Latency: {latency_ms:.1f} ms")
-
-        if cipo_obj:
-            cipo_str = f"{cipo_obj['Z_3d']:.1f}m [{cipo_status}]"
-        else:
-            cipo_str = f"{cipo_status}"
-
-        self.lbl_status_hud.setText(f"CIPO: {cipo_str}")
-
-        if cipo_status == "DANGER":
-            self.lbl_status_hud.setStyleSheet("background-color: #DA3633; color: #FFFFFF;")
-        elif cipo_status == "WARNING":
-            self.lbl_status_hud.setStyleSheet("background-color: #D9822B; color: #FFFFFF;")
-        elif cipo_status == "DEGRADED":
-            self.lbl_status_hud.setStyleSheet("background-color: #6E7681; color: #FFFFFF;")
-        else:
-            self.lbl_status_hud.setStyleSheet("background-color: #238636; color: #FFFFFF;")
-
-        alerts = alerts or {}
-        ldw = alerts.get("ldw") or "OFF"
-        fcw = alerts.get("fcw") or "OFF"
-        idle = "background-color: #21262D; color: #C9D1D9; border: 1px solid #30363D;"
-        amber = "background-color: #D9822B; color: #FFFFFF;"
-        red = "background-color: #DA3633; color: #FFFFFF;"
-        if ldw in ("LEFT", "RIGHT"):
-            self.lbl_ldw.setText(f"LDW {ldw[0]}")
-            self.lbl_ldw.setStyleSheet(amber)
-        else:
-            self.lbl_ldw.setText("LDW")
-            self.lbl_ldw.setStyleSheet(idle)
-        if fcw == "FCW+":
-            self.lbl_fcw.setText("FCW+")
-            self.lbl_fcw.setStyleSheet(red)
-        elif fcw == "FCW":
-            self.lbl_fcw.setText("FCW")
-            self.lbl_fcw.setStyleSheet(amber)
-        else:
-            self.lbl_fcw.setText("FCW")
-            self.lbl_fcw.setStyleSheet(idle)
-
 
     @Slot(str)
     def on_status_message(self, msg):
-        self.status_bar.showMessage(msg)
+        if self.status_bar.isVisible():
+            self.status_bar.showMessage(msg)
 
     def toggle_play_pause(self):
         is_paused = self.worker.toggle_pause()
-        if is_paused:
-            self.btn_play.setText("▶ Play")
-        else:
-            self.btn_play.setText("⏸ Pause")
-
-    def toggle_road_style(self):
-        cinematic = self.bev_widget.toggle_cinematic_road()
-        if self.btn_road_style is not None:
-            self.btn_road_style.setText("Road: Cinematic" if cinematic else "Road: Grid")
-
-    def toggle_lane_lines(self):
-        show = self.bev_widget.toggle_lane_lines()
-        if self.btn_lane_lines is not None:
-            self.btn_lane_lines.setChecked(show)
-            self.btn_lane_lines.setText("Lanes: ON" if show else "Lanes: OFF")
-
-    def toggle_scenic_view(self):
-        scenic = self.bev_widget.toggle_scenic_view()
-        if self.btn_scenic is not None:
-            self.btn_scenic.setText("View: Scene" if scenic else "View: Road")
+        self.btn_play.setText("▶" if is_paused else "⏸")
 
     def open_video_file(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "Open MP4 Video File", "", "Video Files (*.mp4 *.avi *.mkv)")
