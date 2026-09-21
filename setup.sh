@@ -1,10 +1,26 @@
 #!/usr/bin/env bash
-# Professional detect-and-adapt setup for Anchor3DLane ADAS (Jetson / CUDA hosts).
-# Flow: detect → ensure CUDA/TRT → system-site-packages venv → pip deps → verify → build engines
+# Detect-and-adapt setup for the lane-detection ADAS stack (Jetson / CUDA hosts).
+# Flow: detect → ensure CUDA/TRT → system-site-packages venv → pip deps → verify →
+#       inventory ONNX under models/ → build missing TensorRT engines
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
+
+REBUILD_ENGINES=0
+for arg in "$@"; do
+  case "$arg" in
+    --rebuild-engines) REBUILD_ENGINES=1 ;;
+    -h|--help)
+      cat <<EOF
+Usage: ./setup.sh [--rebuild-engines]
+
+  --rebuild-engines   Rebuild TensorRT engines even if the .engine file exists
+EOF
+      exit 0
+      ;;
+  esac
+done
 
 log()  { echo "[INFO]  $*"; }
 warn() { echo "[WARN]  $*" >&2; }
@@ -199,8 +215,13 @@ ensure_tensorrt() {
 }
 
 # ---------------------------------------------------------------------------
-# Git LFS model weights
+# Git LFS model weights + ONNX inventory
 # ---------------------------------------------------------------------------
+# ADAS GUI engines (ONNX → TensorRT). Extra ONNX on disk that the app does not
+# load (e.g. yolo26n-reid) is listed but not compiled.
+LANE_ONNX="models/anchor3dlane_raw.onnx"
+LANE_ENGINE="models/anchor3dlane_raw.engine"
+
 fetch_lfs() {
   section "Fetching Git LFS model weights"
   if command -v git-lfs >/dev/null 2>&1 || git lfs version >/dev/null 2>&1; then
@@ -210,8 +231,47 @@ fetch_lfs() {
     warn "git-lfs not available; skipping LFS pull"
   fi
 
-  [[ -f models/anchor3dlane_raw.onnx ]] || die "Missing models/anchor3dlane_raw.onnx"
-  [[ -f models/midas_small.onnx ]] || warn "Missing models/midas_small.onnx (depth engine will be skipped)"
+  mkdir -p models
+  [[ -f "$LANE_ONNX" ]] || die "Missing ${LANE_ONNX} (lane detector)"
+}
+
+model_status() {
+  local onnx="$1"
+  local engine="$2"
+  local role="$3"
+  local required="${4:-0}"
+  if [[ -f "$onnx" ]]; then
+    if [[ -f "$engine" && "$REBUILD_ENGINES" -eq 0 ]]; then
+      log "HAVE  ${role}: ${onnx}  →  ${engine}"
+    elif [[ -f "$engine" ]]; then
+      log "REBUILD ${role}: ${onnx}  →  ${engine}"
+    else
+      log "BUILD ${role}: ${onnx}  →  ${engine} (engine missing)"
+    fi
+  else
+    if [[ "$required" -eq 1 ]]; then
+      die "Missing required ONNX for ${role}: ${onnx}"
+    fi
+    warn "SKIP  ${role}: missing ${onnx}"
+  fi
+}
+
+inventory_models() {
+  section "Checking ONNX models under models/"
+  log "rebuild_engines=${REBUILD_ENGINES}"
+  model_status "$LANE_ONNX" "$LANE_ENGINE" "lanes" 1
+  model_status models/yolov8n.onnx models/yolov8n.engine "vehicles (YOLO)" 0
+  model_status models/traffic_sign_yolo11n.onnx models/traffic_sign_yolo11n.engine "traffic signs" 0
+  model_status models/us_lprnet_baseline18.onnx models/us_lprnet_baseline18.engine "LPRNet (US plates)" 0
+  model_status models/midas_small.onnx models/monocular_depth.engine "depth (optional)" 0
+  if [[ -f models/yolo26n-reid.onnx ]]; then
+    log "EXTRA models/yolo26n-reid.onnx (not used by the ADAS app — not compiled)"
+  fi
+  if [[ -f models/lprnet_dict_us.txt ]]; then
+    log "HAVE  LPRNet charset: models/lprnet_dict_us.txt"
+  else
+    warn "Missing models/lprnet_dict_us.txt (LPRNet decode needs it)"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -316,27 +376,49 @@ build_engine() {
     warn "Skip engine (missing ONNX): $onnx"
     return 0
   fi
-  if [[ -f "$engine" ]]; then
+  if [[ -f "$engine" && "$REBUILD_ENGINES" -eq 0 ]]; then
     log "Skip existing engine: $engine"
     return 0
   fi
-  log "Building $engine from $onnx"
+  if [[ -f "$engine" && "$REBUILD_ENGINES" -eq 1 ]]; then
+    log "Rebuilding $engine from $onnx"
+  else
+    log "Building $engine from $onnx"
+  fi
   "$TRTEXEC" --onnx="$onnx" --saveEngine="$engine" --fp16 "$@"
 }
 
+build_yolo_engine() {
+  if [[ -f models/yolov8n.engine && "$REBUILD_ENGINES" -eq 0 ]]; then
+    log "Skip existing engine: models/yolov8n.engine"
+    return 0
+  fi
+  if [[ -f models/yolov8n.onnx ]]; then
+    build_engine models/yolov8n.onnx models/yolov8n.engine
+    return 0
+  fi
+  if [[ -f scripts/export_yolo_orin.py ]]; then
+    log "No yolov8n.onnx — exporting and compiling via scripts/export_yolo_orin.py"
+    ./venv/bin/python scripts/export_yolo_orin.py --imgsz 640
+    return 0
+  fi
+  warn "Skip vehicles engine (no models/yolov8n.onnx and no export script)"
+}
+
 build_engines() {
-  section "Building TensorRT engines (FP16)"
+  section "Building TensorRT engines (FP16) from ONNX"
 
   mkdir -p models
-  build_engine models/anchor3dlane_raw.onnx models/anchor3dlane_raw.engine
-  build_engine models/midas_small.onnx models/monocular_depth.engine
+  inventory_models
 
-  if [[ -f models/yolov8n.engine ]]; then
-    log "Skip existing engine: models/yolov8n.engine"
-  else
-    log "Building models/yolov8n.engine via scripts/export_yolo_orin.py"
-    ./venv/bin/python scripts/export_yolo_orin.py --imgsz 640
-  fi
+  build_engine "$LANE_ONNX" "$LANE_ENGINE"
+  build_yolo_engine
+  build_engine models/traffic_sign_yolo11n.onnx models/traffic_sign_yolo11n.engine
+  build_engine models/us_lprnet_baseline18.onnx models/us_lprnet_baseline18.engine \
+    --minShapes=image_input:1x3x48x96 \
+    --optShapes=image_input:1x3x48x96 \
+    --maxShapes=image_input:1x3x48x96
+  build_engine models/midas_small.onnx models/monocular_depth.engine
 }
 
 print_next_steps() {
@@ -356,13 +438,21 @@ Other:
   python scripts/run_pyside6_app.py --test-mode
 
 Rebuild engines later (if needed):
-  rm -f models/*.engine && ./setup.sh
+  ./setup.sh --rebuild-engines
 EOF
 }
 
 # ---------------------------------------------------------------------------
 main() {
-  section "Anchor3DLane detect-and-adapt setup"
+  section "Lane detection ADAS detect-and-adapt setup"
+  if [[ "$REBUILD_ENGINES" -eq 1 ]]; then
+    detect_env
+    [[ -n "$TRTEXEC" && -x "$TRTEXEC" ]] || die "trtexec not found. Run ./setup.sh once without --rebuild-engines."
+    fetch_lfs
+    build_engines
+    print_next_steps
+    return
+  fi
   detect_env
   ensure_base_packages
   ensure_cuda

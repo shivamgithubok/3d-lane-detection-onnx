@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="data/Logo/logo.png" alt="Anchor3DLane ADAS Logo" width="480"/>
+  <img src="data/Logo/logo.png" alt="Lane Detection ADAS Logo" width="480"/>
 </p>
 
 <p align="center">
@@ -9,9 +9,9 @@
   <img src="https://img.shields.io/badge/python-3.8%2B-blue?logo=python" alt="Python 3.8+"/>
 </p>
 
-# Anchor3DLane Jetson Inference & TensorRT + CIPO BEV ADAS
+# Lane Detection Jetson Inference & TensorRT + CIPO BEV ADAS
 
-Real-time **3D lane detection** and **CIPO (Closest In-Path Object)** visualization for **NVIDIA Jetson Orin**, with TensorRT engines, YOLO ByteTrack vehicle tracking, monocular depth, and a PySide6 front-camera + Qt Quick 3D BEV dashboard.
+Real-time **3D lane detection** and **CIPO (Closest In-Path Object)** visualization for **NVIDIA Jetson Orin**, with TensorRT engines, YOLO ByteTrack vehicle tracking, traffic-sign ISA, US LPRNet speed-limit OCR, LDW/FCW alerts, and a PySide6 front-camera + Qt Quick 3D BEV dashboard.
 
 The BEV is **lane-anchored**: the ego corridor stays pinned on the canvas, the car and traffic move inside it, and dashed markings scroll from HUD speed (`∫v·dt`). Pose (`c0`, `c1`) is filtered faster than curvature (`c2`, `c3`) so the near field stays responsive without far-field flicker.
 
@@ -22,9 +22,12 @@ The BEV is **lane-anchored**: the ego corridor stays pinned on the canvas, the c
 ## Quick Start
 
 ```bash
-# 1) One-step setup (system deps, venv, requirements.txt, TensorRT engine)
+# 1) One-step setup (system deps, venv, requirements.txt, TensorRT engines from ONNX)
 chmod +x setup.sh
 ./setup.sh
+
+# Rebuild engines from ONNX already in models/ (skips APT / venv)
+# ./setup.sh --rebuild-engines
 
 # 2) Activate venv
 source venv/bin/activate
@@ -85,6 +88,7 @@ Installed automatically by `setup.sh` via `pip install -r requirements.txt`:
 | `protobuf>=4.25.0` | ONNX / model protobuf support |
 | `flatbuffers>=23.5.26` | Runtime serialization |
 | `PySide6>=6.6.0` | ADAS GUI (front cam + BEV) |
+| `ultralytics>=8.0.0` | YOLO export / ByteTrack |
 
 Manual install (if not using `setup.sh`):
 
@@ -100,7 +104,7 @@ pip install -r requirements.txt
 `setup.sh` installs (through `apt`):
 
 - `cuda-toolkit`
-- `nvidia-tensorrt-dev`, `libnvinfer-bin`, `python3-libnvinfer`
+- `libnvinfer-bin`, `python3-libnvinfer`
 - `python3-opencv`
 - `git-lfs`
 - `libcurl4-openssl-dev`, `libsqlite3-dev`
@@ -117,26 +121,53 @@ Detect-and-adapt setup (safe across Jetsons with different CUDA/TensorRT stacks)
 4. Reuses system TensorRT when present; otherwise installs `libnvinfer-bin` + `python3-libnvinfer` (avoids conflicting `nvidia-tensorrt-dev` when possible)
 5. Creates `venv` with `--system-site-packages` so system TensorRT/OpenCV are visible
 6. Installs `requirements.txt`, then removes any pip TensorRT wheels that would shadow system TRT
-7. Verifies imports, then builds missing engines: lane, MiDaS depth, YOLO
+7. Verifies imports, inventories ONNX under `models/`, then builds missing TensorRT engines (lanes, YOLO vehicles, traffic signs, LPRNet, optional MiDaS depth)
 
 ```bash
 chmod +x setup.sh
 ./setup.sh
+
+# Rebuild .engine files from existing ONNX (does not skip present engines)
+./setup.sh --rebuild-engines
 ```
 
 ---
 
 ## TensorRT Engine Build
 
-If the engine is missing or you need to rebuild for this Orin:
+`setup.sh` compiles each ONNX that is present under `models/`. Engines must be built **on this Orin** (do not copy `.engine` files between machines).
 
 ```bash
+# Lane detector
 trtexec --onnx=models/anchor3dlane_raw.onnx \
         --saveEngine=models/anchor3dlane_raw.engine \
         --fp16
+
+# Vehicles (YOLOv8n)
+trtexec --onnx=models/yolov8n.onnx \
+        --saveEngine=models/yolov8n.engine \
+        --fp16
+
+# Traffic signs (YOLOv11n)
+trtexec --onnx=models/traffic_sign_yolo11n.onnx \
+        --saveEngine=models/traffic_sign_yolo11n.engine \
+        --fp16
+
+# US LPRNet (speed-limit plates) — fixed 48×96 input
+trtexec --onnx=models/us_lprnet_baseline18.onnx \
+        --saveEngine=models/us_lprnet_baseline18.engine \
+        --fp16 \
+        --minShapes=image_input:1x3x48x96 \
+        --optShapes=image_input:1x3x48x96 \
+        --maxShapes=image_input:1x3x48x96
+
+# Optional depth
+trtexec --onnx=models/midas_small.onnx \
+        --saveEngine=models/monocular_depth.engine \
+        --fp16
 ```
 
-Benchmark:
+Lane benchmark:
 
 ```bash
 trtexec --loadEngine=models/anchor3dlane_raw.engine \
@@ -146,16 +177,23 @@ trtexec --loadEngine=models/anchor3dlane_raw.engine \
 
 Expected models for the full PySide6 pipeline:
 
-- `models/anchor3dlane_raw.engine` — 3D lanes
-- `models/yolov8n.engine` — YOLOv8-nano vehicles (ByteTrack, imgsz=640)
+| File | Role |
+| :--- | :--- |
+| `models/anchor3dlane_raw.engine` | 3D lanes |
+| `models/yolov8n.engine` | Vehicles (ByteTrack, imgsz=640) |
+| `models/traffic_sign_yolo11n.engine` | Traffic signs / ISA |
+| `models/us_lprnet_baseline18.engine` | US LPRNet digit OCR |
+| `models/lprnet_dict_us.txt` | LPRNet charset |
+| `models/monocular_depth.engine` | Depth (optional) |
 
-Compile YOLO for this Orin (backs up the previous engine):
+If YOLO ONNX is missing, export then compile:
 
 ```bash
 source venv/bin/activate
 python scripts/export_yolo_orin.py --imgsz 640
+python scripts/export_traffic_sign_orin.py
+python scripts/export_lprnet_orin.py
 ```
-- `models/monocular_depth.engine` — depth (optional path)
 
 ---
 
@@ -196,7 +234,7 @@ python scripts/debug/width_bias_probe.py              # raw ego-pair width vs 12
 │   └── debug/                      # BEV tune / QML verify / crop & width probes
 ├── src/
 │   ├── ui/               # PySide6 + Qt Quick 3D BEV
-│   ├── inference/        # TRT / CIPO / YOLO / depth
+│   ├── inference/        # TRT / CIPO / YOLO / signs / LPRNet / LDW-FCW
 │   ├── tracking/         # RoadStateEstimator + LaneFrameModel
 │   └── utils/            # CameraTransform, ego speed, calibration
 ├── requirements.txt
