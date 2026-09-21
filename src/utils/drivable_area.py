@@ -864,9 +864,8 @@ def get_ego_corridor_sides_2d(
 
     src_l = left_corridor_3d if use_smoothed_corridor else ego_left
     src_r = right_corridor_3d if use_smoothed_corridor else ego_right
-    if use_smoothed_corridor:
-        src_l = _clip_corridor_3d_near(src_l, y_start)
-        src_r = _clip_corridor_3d_near(src_r, y_start)
+    src_l = _clip_corridor_3d_near(src_l, y_start)
+    src_r = _clip_corridor_3d_near(src_r, y_start)
 
     pts_l = decode_lane_pixels(src_l, P_matrix, flat_ground=False)
     pts_r = decode_lane_pixels(src_r, P_matrix, flat_ground=False)

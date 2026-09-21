@@ -29,9 +29,10 @@ def main():
     dummy = DummyBev()
     cockpit = HexCockpit(dummy)
     cockpit.resize(WINDOW_W, WINDOW_H)
-    cockpit.gauge.set_kmh(72)
-    cockpit.lbl_limit.setText(
-        "SPEED LIMIT<br><span style='font-size:26px;font-weight:800;color:#F4FAFF'>89</span><br>LIMIT"
+    cockpit.update_hud(
+        speed_mps=64 / 3.6,
+        alerts={"isa": {"posted_mph": 55}},
+        lane_ok=True,
     )
     cockpit.show()
     cockpit.settings_wheel.open_menu()

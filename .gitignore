@@ -53,3 +53,6 @@ models/monocular_depth.engine
 models/midas_small.onnx
 *.json
 *.MP4
+data/surround_view/
+scripts/test_surround_view.py
+src/surround_view/

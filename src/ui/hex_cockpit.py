@@ -1,4 +1,4 @@
-"""Hexagonal infotainment shell: honeycomb bezel + cluster HUD over BEV / live."""
+"""Curved dual-wing infotainment shell over the live ADAS BEV/camera pipeline."""
 
 from __future__ import annotations
 
@@ -18,8 +18,10 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
+    QBrush,
     QColor,
     QFont,
+    QLinearGradient,
     QPainter,
     QPainterPath,
     QPen,
@@ -40,23 +42,83 @@ from PySide6.QtWidgets import (
 NAVY = QColor("#050A14")
 CYAN = QColor("#3EC8FF")
 ICE = QColor("#E8F4FF")
-MUTED = QColor("#7A93A8")
 WINDOW_W, WINDOW_H = 1280, 720
 
 
-def _hex_metrics(w, h):
-    """Inset hex so top/side bezels can hold speed, limit, and gear."""
-    mx, my = w * 0.06, h * 0.12
-    cx, cy = w * 0.5, h * 0.50
-    return cx, cy, (w * 0.5) - mx, (h * 0.5) - my
+def _viewport_rect(w, h):
+    return QRectF(7, 7, w - 14, h - 14)
 
 
-def _flat_hex_points(cx, cy, rx, ry):
-    pts = []
-    for i in range(6):
-        ang = math.radians(i * 60)
-        pts.append(QPoint(int(cx + rx * math.cos(ang)), int(cy + ry * math.sin(ang))))
-    return pts
+def _viewport_path(w, h):
+    path = QPainterPath()
+    path.addRoundedRect(_viewport_rect(w, h), 18, 18)
+    return path
+
+
+def _wing_edge(w, h, right=False):
+    x = w * (0.76 if right else 0.24)
+    sign = -1.0 if right else 1.0
+    path = QPainterPath(QPoint(int(x), int(h * 0.18)))
+    path.cubicTo(
+        x + sign * w * 0.065, h * 0.30,
+        x + sign * w * 0.065, h * 0.68,
+        x, h * 0.80,
+    )
+    return path
+
+
+def _wing_path(w, h, right=False):
+    edge = _wing_edge(w, h, right)
+    if right:
+        path = QPainterPath(QPoint(int(w * 0.975), int(h * 0.07)))
+        path.lineTo(w * 0.76, h * 0.18)
+        path.connectPath(edge)
+        path.lineTo(w * 0.975, h * 0.90)
+    else:
+        path = QPainterPath(QPoint(int(w * 0.025), int(h * 0.07)))
+        path.lineTo(w * 0.24, h * 0.18)
+        path.connectPath(edge)
+        path.lineTo(w * 0.025, h * 0.90)
+    path.closeSubpath()
+    return path
+
+
+def _wing_border(w, h, right=False):
+    """Open inner border: upper sweep, concave edge, and lower sweep."""
+    if right:
+        path = QPainterPath(QPoint(int(w * 0.975), int(h * 0.07)))
+        path.lineTo(w * 0.76, h * 0.18)
+    else:
+        path = QPainterPath(QPoint(int(w * 0.025), int(h * 0.07)))
+        path.lineTo(w * 0.24, h * 0.18)
+    path.connectPath(_wing_edge(w, h, right))
+    path.lineTo(w * (0.975 if right else 0.025), h * 0.90)
+    return path
+
+
+def _center_path(w, h):
+    """Curved center opening used as the real BEV/live-video mask."""
+    left_x, right_x = w * 0.24, w * 0.76
+    top_y, bottom_y = h * 0.18, h * 0.80
+    path = QPainterPath(QPoint(int(left_x), int(top_y)))
+    # Upper boundary joins both wing edges without a gap.
+    path.cubicTo(w * 0.38, h * 0.10, w * 0.62, h * 0.10, right_x, top_y)
+    # Right concave wing edge.
+    path.cubicTo(
+        right_x - w * 0.065, h * 0.30,
+        right_x - w * 0.065, h * 0.68,
+        right_x, bottom_y,
+    )
+    # Lower boundary joins both wing edges without a gap.
+    path.cubicTo(w * 0.62, h * 0.88, w * 0.38, h * 0.88, left_x, bottom_y)
+    # Left concave wing edge, traversed upward.
+    path.cubicTo(
+        left_x + w * 0.065, h * 0.68,
+        left_x + w * 0.065, h * 0.30,
+        left_x, top_y,
+    )
+    path.closeSubpath()
+    return path
 
 
 def _set_text(label, text):
@@ -65,17 +127,16 @@ def _set_text(label, text):
 
 
 class HexBezel(QWidget):
-    """Navy honeycomb surround; pixmap-cached so video frames do not redraw it."""
+    """Cached curved shell and clipped honeycomb wings."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
-        self._hex_pts = []
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
         self._cache = None
 
     def hex_polygon(self):
-        return QPolygon(self._hex_pts) if self._hex_pts else QPolygon()
+        return QPolygon(_viewport_path(self.width(), self.height()).toFillPolygon().toPolygon())
 
     def resizeEvent(self, event):
         self._rebuild()
@@ -85,30 +146,61 @@ class HexBezel(QWidget):
         w, h = self.width(), self.height()
         if w < 8 or h < 8:
             return
-        cx, cy, rx, ry = _hex_metrics(w, h)
-        self._hex_pts = _flat_hex_points(cx, cy, rx, ry)
-        inset = _flat_hex_points(cx, cy, rx * 0.988, ry * 0.988)
-        self.setMask(QRegion(self.rect()) - QRegion(QPolygon(inset)))
+        self.clearMask()
         self._cache = QPixmap(w, h)
-        self._cache.fill(NAVY)
+        self._cache.fill(Qt.transparent)
         p = QPainter(self._cache)
         p.setRenderHint(QPainter.Antialiasing, True)
-        self._paint_honeycomb(p, w, h)
-        hex_path = QPainterPath()
-        hex_path.addPolygon(QPolygon(self._hex_pts))
+
+        for right in (False, True):
+            wing = _wing_path(w, h, right)
+            p.save()
+            p.setClipPath(wing)
+            p.fillPath(wing, QColor("#071426"))
+            self._paint_honeycomb(p, w, h, right)
+            p.restore()
+
+        outer = QRectF(6, 6, w - 12, h - 12)
+        for width, alpha in ((7, 16), (1.6, 85)):
+            glow = QColor("#244D72")
+            glow.setAlpha(alpha)
+            p.setPen(QPen(glow, width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(outer, 18, 18)
+
+        self._draw_dark_rail(p, w, h, top=True)
+        self._draw_dark_rail(p, w, h, top=False)
         p.end()
         self.update()
+
+    def _draw_dark_rail(self, p, w, h, top):
+        """Center boundary joins the left and right wing corners exactly."""
+        y = h * (0.18 if top else 0.80)
+        ctrl = h * (0.10 if top else 0.88)
+        path = QPainterPath(QPoint(int(w * 0.24), int(y)))
+        path.cubicTo(w * 0.38, ctrl, w * 0.62, ctrl, w * 0.76, y)
+        p.setPen(QPen(QColor(20, 64, 92, 175), 1.25, Qt.SolidLine, Qt.RoundCap))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(path)
 
     def paintEvent(self, event):
         if self._cache is None:
             return
         QPainter(self).drawPixmap(0, 0, self._cache)
 
-    def _paint_honeycomb(self, painter, w, h):
+    def _paint_honeycomb(self, painter, w, h, right=False):
         r = 18.0
         dx = r * math.sqrt(3)
         dy = r * 1.5
-        painter.setPen(QPen(QColor(40, 90, 130, 55), 1))
+        # Cells brighten smoothly toward each wing's inner curved edge.
+        if right:
+            gradient = QLinearGradient(w, 0, w * 0.74, 0)
+        else:
+            gradient = QLinearGradient(0, 0, w * 0.26, 0)
+        gradient.setColorAt(0.0, QColor(38, 88, 128, 48))
+        gradient.setColorAt(0.68, QColor(55, 125, 174, 105))
+        gradient.setColorAt(1.0, QColor(92, 185, 224, 175))
+        painter.setPen(QPen(QBrush(gradient), 1.15))
         painter.setBrush(Qt.NoBrush)
         rows = int(h / dy) + 2
         cols = int(w / dx) + 2
@@ -132,47 +224,41 @@ class HexBezel(QWidget):
 
 
 class HexStroke(QWidget):
-    """Unmasked 6-edge outline so top-left / top-right facets stay visible over video."""
+    """Unmasked cyan inner wing edges over the live viewport."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self._pts = []
+        self._size = QSize()
 
     def set_points(self, pts):
-        self._pts = list(pts)
         self.update()
 
     def paintEvent(self, event):
-        if len(self._pts) < 6:
-            return
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        path = QPainterPath()
-        path.addPolygon(QPolygon(self._pts))
-        path.closeSubpath()
-        glow = QColor(CYAN)
-        for width, alpha in ((7, 40), (3.2, 230)):
-            glow.setAlpha(alpha)
-            p.setPen(QPen(glow, width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            p.setBrush(Qt.NoBrush)
-            p.drawPath(path)
+        for right in (False, True):
+            path = _wing_border(self.width(), self.height(), right)
+            for width, alpha in ((10, 24), (2.2, 215)):
+                glow = QColor(CYAN)
+                glow.setAlpha(alpha)
+                p.setPen(QPen(glow, width, Qt.SolidLine, Qt.RoundCap))
+                p.setBrush(Qt.NoBrush)
+                p.drawPath(path)
         p.end()
 
 
 class SpeedGauge(QWidget):
-    """Open horseshoe cluster gauge with tick marks (concept-art style)."""
+    """Reference-style full donut gauge."""
 
-    _START = 210.0
-    _SPAN = -240.0
     _VMAX = 160.0
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._kmh = 0.0
         self._shown = 0
-        self.setFixedSize(200, 168)
+        self.setFixedSize(220, 220)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
 
     def set_kmh(self, kmh):
@@ -187,49 +273,39 @@ class SpeedGauge(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        cx, cy = self.width() / 2.0, 92.0
+        cx = cy = self.width() / 2.0
         r = 78.0
         ring = QRectF(cx - r, cy - r, r * 2, r * 2)
-        start = int(self._START * 16)
-        span = int(self._SPAN * 16)
 
         p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(80, 170, 220, 70), 2))
-        p.drawArc(ring, start, span)
+        p.setPen(QPen(QColor(25, 72, 120, 200), 14, Qt.SolidLine, Qt.RoundCap))
+        p.drawEllipse(ring)
 
-        inner = ring.adjusted(9, 9, -9, -9)
-        p.setPen(QPen(QColor(190, 225, 250, 210), 3, Qt.SolidLine, Qt.RoundCap))
-        p.drawArc(inner, start, span)
-
-        for i in range(25):
-            t = i / 24.0
-            deg = self._START + self._SPAN * t
-            major = (i % 4 == 0)
+        for i in range(8):
+            deg = i * 45.0
             rad = math.radians(deg)
-            r0 = r - (17 if major else 12)
-            r1 = r - 5
+            r0, r1 = r + 15, r + 23
             x0 = cx + r0 * math.cos(rad)
             y0 = cy - r0 * math.sin(rad)
             x1 = cx + r1 * math.cos(rad)
             y1 = cy - r1 * math.sin(rad)
-            p.setPen(QPen(QColor(200, 230, 255, 230 if major else 140), 2 if major else 1))
+            p.setPen(QPen(QColor(175, 220, 245, 170), 2))
             p.drawLine(QPoint(int(x0), int(y0)), QPoint(int(x1), int(y1)))
 
         frac = min(1.0, self._kmh / self._VMAX)
         if frac > 0.01:
-            fill = ring.adjusted(5, 5, -5, -5)
-            fill_span = int(self._SPAN * frac * 16)
-            p.setPen(QPen(QColor(40, 160, 255, 90), 14, Qt.SolidLine, Qt.RoundCap))
-            p.drawArc(fill, start, fill_span)
-            p.setPen(QPen(CYAN, 7, Qt.SolidLine, Qt.RoundCap))
-            p.drawArc(fill, start, fill_span)
+            fill_span = int(-360 * frac * 16)
+            p.setPen(QPen(QColor(40, 160, 255, 75), 22, Qt.SolidLine, Qt.RoundCap))
+            p.drawArc(ring, 90 * 16, fill_span)
+            p.setPen(QPen(CYAN, 13, Qt.SolidLine, Qt.RoundCap))
+            p.drawArc(ring, 90 * 16, fill_span)
 
         p.setPen(ICE)
-        p.setFont(QFont("Segoe UI", 34, QFont.Bold))
-        p.drawText(QRect(0, 52, self.width(), 50), Qt.AlignCenter, f"{self._shown}")
+        p.setFont(QFont("Segoe UI", 46, QFont.Normal))
+        p.drawText(QRect(0, 66, self.width(), 60), Qt.AlignCenter, f"{self._shown}")
         p.setPen(QColor("#9EC8E0"))
-        p.setFont(QFont("Segoe UI", 10))
-        p.drawText(QRect(0, 100, self.width(), 18), Qt.AlignCenter, "km/h")
+        p.setFont(QFont("Segoe UI", 13))
+        p.drawText(QRect(0, 126, self.width(), 24), Qt.AlignCenter, "km/h")
         p.end()
 
 
@@ -241,8 +317,9 @@ class TriggerBanner(QWidget):
         self._kind = kind
         self._title = "FCW" if kind == "fcw" else "LDW"
         self._body = ""
+        self._active = False
         self._pulse = 0.0
-        self.setFixedSize(168, 72)
+        self.setFixedSize(210, 94)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -253,6 +330,7 @@ class TriggerBanner(QWidget):
         self.update()
 
     def set_trigger(self, on, title=None, body=""):
+        self._active = bool(on)
         if title:
             self._title = title
         self._body = body or ""
@@ -269,63 +347,64 @@ class TriggerBanner(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        cx, cy = 34, self.height() / 2.0
         hot = self._kind == "fcw"
-        ring = QColor(255, 90, 40, int(50 + 40 * abs(math.sin(self._pulse)))) if hot else QColor(
-            255, 180, 50, int(50 + 40 * abs(math.sin(self._pulse)))
-        )
-        for i, rad in enumerate((30, 24, 18)):
-            c = QColor(ring)
-            c.setAlpha(max(20, ring.alpha() - i * 18))
-            p.setPen(QPen(c, 2))
-            p.setBrush(Qt.NoBrush)
-            p.drawRoundedRect(QRectF(cx - rad, cy - rad * 0.55, rad * 2.4, rad * 1.1), 10, 10)
-        card = QRectF(8, 10, self.width() - 14, self.height() - 20)
+        border = QColor("#FF9348")
+        card = QRectF(7, 7, self.width() - 14, self.height() - 14)
         path = QPainterPath()
-        path.addRoundedRect(card, 10, 10)
-        border = QColor("#FF5A28") if hot else QColor("#FFC14A")
-        p.setPen(QPen(border, 2))
-        p.setBrush(QColor(28, 10, 8, 210) if hot else QColor(28, 20, 8, 210))
-        p.drawPath(path)
-        p.setPen(border)
-        p.setFont(QFont("Segoe UI", 11, QFont.Bold))
-        p.drawText(QRect(44, 14, 120, 22), Qt.AlignLeft | Qt.AlignVCenter, self._title)
-        p.setFont(QFont("Segoe UI", 9))
-        p.setPen(QColor("#FFD0C0") if hot else QColor("#FFE6B0"))
-        p.drawText(QRect(44, 36, 120, 20), Qt.AlignLeft | Qt.AlignVCenter, self._body)
-        # shield / chevron mark
-        p.setPen(QPen(border, 2))
+        path.addRoundedRect(card, 13, 13)
+        pulse = int(22 + 18 * abs(math.sin(self._pulse)))
+        p.setPen(QPen(QColor(255, 120, 50, pulse), 9))
         p.setBrush(Qt.NoBrush)
+        p.drawPath(path)
+        p.setPen(QPen(border, 2.2))
+        p.setBrush(QColor(18, 15, 20, 220))
+        p.drawPath(path)
         if hot:
-            p.drawRoundedRect(QRectF(16, 24, 18, 20), 3, 3)
+            shield = QPainterPath(QPoint(38, 24))
+            shield.lineTo(56, 31)
+            shield.cubicTo(55, 57, 48, 67, 38, 73)
+            shield.cubicTo(28, 67, 21, 57, 20, 31)
+            shield.closeSubpath()
+            p.setPen(QPen(border, 3))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(shield)
+            p.drawLine(QPoint(29, 47), QPoint(36, 54))
+            p.drawLine(QPoint(36, 54), QPoint(48, 40))
+            p.setPen(ICE)
+            p.setFont(QFont("Segoe UI", 18, QFont.Bold))
+            p.drawText(QRect(70, 20, 130, 34), Qt.AlignLeft | Qt.AlignVCenter, self._title)
+            p.setPen(QColor("#D6D5D8"))
+            p.setFont(QFont("Segoe UI", 10))
+            p.drawText(QRect(70, 51, 130, 22), Qt.AlignLeft | Qt.AlignVCenter, self._body)
         else:
-            p.drawLine(QPoint(18, 40), QPoint(25, 28))
-            p.drawLine(QPoint(25, 28), QPoint(32, 40))
+            text = f"{self._title} {self._body}".strip()
+            p.setPen(ICE)
+            p.setFont(QFont("Segoe UI", 17, QFont.Bold))
+            p.drawText(card, Qt.AlignCenter, text)
         p.end()
 
 
 class SettingsGear(QWidget):
-    """Holographic rotating cog on the right hex edge."""
+    """Icon-only 2x2 feature launcher."""
 
     clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(118, 118)
+        self.setFixedSize(62, 62)
         self.setCursor(Qt.PointingHandCursor)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self._angle = 0.0
         self._fast = False
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(40)
 
     def set_active(self, on):
         self._fast = bool(on)
         self.update()
 
     def _tick(self):
-        self._angle = (self._angle + (4.2 if self._fast else 1.1)) % 360.0
+        self._angle = (self._angle + 1.0) % 360.0
         self.update()
 
     def mousePressEvent(self, event):
@@ -336,43 +415,20 @@ class SettingsGear(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        cx, cy = self.width() / 2.0, self.height() / 2.0
+        tile = QRectF(5, 5, 52, 52)
+        p.setPen(QPen(CYAN, 2))
+        p.setBrush(QColor(7, 24, 43, 225 if self._fast else 185))
+        p.drawRoundedRect(tile, 15, 15)
+        p.setPen(QPen(ICE if self._fast else CYAN, 1.8))
         p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(62, 200, 255, 50), 2))
-        p.drawEllipse(QRectF(cx - 54, cy - 54, 108, 108))
-        p.setPen(QPen(QColor(62, 200, 255, 90), 1.6))
-        p.drawEllipse(QRectF(cx - 42, cy - 42, 84, 84))
-        p.save()
-        p.translate(cx, cy)
-        p.rotate(-self._angle * 0.55)
-        p.setPen(QPen(QColor(62, 200, 255, 80), 1.4))
-        p.drawArc(QRectF(-50, -50, 100, 100), 40 * 16, 110 * 16)
-        p.drawArc(QRectF(-50, -50, 100, 100), 220 * 16, 70 * 16)
-        p.restore()
-        p.save()
-        p.translate(cx, cy)
-        p.rotate(self._angle)
-        teeth = 8
-        r_out, r_in, r_hub = 28.0, 20.0, 8.0
-        path = QPainterPath()
-        for i in range(teeth * 2):
-            ang = math.radians(i * 180.0 / teeth)
-            r = r_out if i % 2 == 0 else r_in
-            x, y = r * math.cos(ang), r * math.sin(ang)
-            if i == 0:
-                path.moveTo(x, y)
-            else:
-                path.lineTo(x, y)
-        path.closeSubpath()
-        p.setPen(QPen(CYAN, 2.2))
-        p.setBrush(QColor(20, 80, 130, 80))
-        p.drawPath(path)
-        p.setBrush(QColor(8, 20, 36, 180))
-        p.drawEllipse(QPoint(0, 0), int(r_hub), int(r_hub))
-        p.setPen(QPen(CYAN, 1.4))
-        p.setBrush(Qt.NoBrush)
-        p.drawEllipse(QPoint(0, 0), int(r_hub - 2), int(r_hub - 2))
-        p.restore()
+        size, gap = 10.0, 7.0
+        x0 = y0 = 5 + (52 - (size * 2 + gap)) / 2
+        for row in range(2):
+            for col in range(2):
+                p.drawRoundedRect(
+                    QRectF(x0 + col * (size + gap), y0 + row * (size + gap), size, size),
+                    2, 2,
+                )
         p.end()
 
 
@@ -386,6 +442,7 @@ class SettingsWheel(QWidget):
         ("grid", "GRID HUD"),
         ("bev", "ADAS BEV"),
         ("live", "LIVE VIEW"),
+        ("full", "FULL VIEW"),
     )
 
     def __init__(self, parent=None):
@@ -393,7 +450,7 @@ class SettingsWheel(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self._index = 2
         self._rise = 0.0
-        self._hex = []
+        self._clip = QPainterPath()
         self._anim = None
         self.hide()
 
@@ -407,7 +464,13 @@ class SettingsWheel(QWidget):
     rise = Property(float, _get_rise, _set_rise)
 
     def set_hex(self, pts):
-        self._hex = list(pts)
+        if isinstance(pts, QPainterPath):
+            self._clip = QPainterPath(pts)
+            return
+        self._clip = QPainterPath()
+        if pts:
+            polygon = QPolygon([QPoint(int(p.x()), int(p.y())) for p in pts])
+            self._clip.addPolygon(polygon)
 
     def open_menu(self):
         self.show()
@@ -446,10 +509,8 @@ class SettingsWheel(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        if len(self._hex) >= 6:
-            clip = QPainterPath()
-            clip.addPolygon(QPolygon(self._hex))
-            p.setClipPath(clip)
+        if not self._clip.isEmpty():
+            p.setClipPath(self._clip)
         cx = self.width() / 2.0
         cy = self.height() * 0.50
         n = len(self.ITEMS)
@@ -468,22 +529,30 @@ class SettingsWheel(QWidget):
 
     def _paint_card(self, p, cx, cy, i, rel):
         t = self._rise
-        # Cards start below the hex and rise into a stacked wheel.
-        y = cy + rel * 58.0 + (1.0 - t) * (220.0 + abs(rel) * 36.0)
+        y = cy + rel * 56.0 + (1.0 - t) * (220.0 + abs(rel) * 36.0)
         focus = rel == 0
         scale = 0.82 + 0.18 * t
         if rel < 0:
-            w, h = (292.0 + (18 if rel == -1 else 0)) * scale, 44.0 * scale
+            w, h = (270.0 + (22 if rel == -1 else 0)) * scale, 45.0 * scale
         elif rel > 0:
-            w, h = 400.0 * scale, 68.0 * scale
-            y += 10
+            w, h = 430.0 * scale, 72.0 * scale
+            y += 8
         else:
-            w, h = 430.0 * scale, 86.0 * scale
-        alpha_fill = int((85 if focus else 42) * t)
-        alpha_border = int((240 if focus else 100) * t)
-        rect = QRectF(cx - w / 2.0, y - h / 2.0, w, h)
+            w, h = 370.0 * scale, 82.0 * scale
+        alpha_fill = int((112 if focus else 58) * t)
+        alpha_border = int((245 if focus else 125) * t)
+        slant = (14.0 if rel >= 0 else 8.0) * scale
+        poly = QPolygon(
+            [
+                QPoint(int(cx - w / 2 + slant), int(y - h / 2)),
+                QPoint(int(cx + w / 2 - slant), int(y - h / 2)),
+                QPoint(int(cx + w / 2), int(y + h / 2)),
+                QPoint(int(cx - w / 2), int(y + h / 2)),
+            ]
+        )
         path = QPainterPath()
-        path.addRoundedRect(rect, 10, 10)
+        path.addPolygon(poly)
+        path.closeSubpath()
         p.setPen(QPen(QColor(90, 210, 255, alpha_border), 2.4 if focus else 1.3))
         p.setBrush(QColor(10, 32, 52, alpha_fill))
         p.drawPath(path)
@@ -494,6 +563,7 @@ class SettingsWheel(QWidget):
             p.setPen(QPen(QColor(90, 210, 255, alpha_border), 2.4))
             p.setBrush(QColor(10, 32, 52, alpha_fill))
             p.drawPath(path)
+        rect = poly.boundingRect()
         key, label = self.ITEMS[i]
         p.setPen(QColor(230, 245, 255, int(245 * t)))
         if focus:
@@ -514,7 +584,10 @@ class HexCockpit(QWidget):
     def __init__(self, bev_widget, parent=None):
         super().__init__(parent)
         self.setObjectName("hex_cockpit")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet("#hex_cockpit{background:#02050C;}")
         self._view = "bev"
+        self._full_view = False
         self._hex_pts = []
         self._hud = {}
         self._minute = ""
@@ -533,11 +606,16 @@ class HexCockpit(QWidget):
         self.hex_stroke = HexStroke(self)
 
         self.gauge = SpeedGauge(self)
-        self.lbl_limit = QLabel("SPEED LIMIT<br><span style='font-size:26px'>89</span><br>LIMIT")
+        self.lbl_limit = QLabel("SPEED LIMIT<br><span style='font-size:25px'>—</span>")
         self.lbl_limit.setAlignment(Qt.AlignCenter)
         self.lbl_limit.setParent(self)
         self.lbl_limit.setTextFormat(Qt.RichText)
-        self.lbl_limit.setStyleSheet("color: #D6EEFF; font-size: 11px; font-weight: 700;")
+        self.lbl_limit.setFixedSize(114, 62)
+        self.lbl_limit.setStyleSheet(
+            "QLabel{color:#9FC9E3; font-size:10px; font-weight:700;"
+            "background:rgba(8,27,47,185); border:1px solid rgba(62,200,255,145);"
+            "border-radius:12px; padding-top:3px;}"
+        )
 
         self.banner_fcw = TriggerBanner("fcw", self)
         self.banner_ldw = TriggerBanner("ldw", self)
@@ -555,23 +633,51 @@ class HexCockpit(QWidget):
 
         self.bottom = QFrame(self)
         bot = QHBoxLayout(self.bottom)
-        bot.setContentsMargins(8, 2, 8, 2)
+        bot.setContentsMargins(4, 0, 8, 0)
         self.lbl_time = QLabel("◷  —")
         self.lbl_gps = QLabel("GPS")
         self.lbl_status = QLabel("●  ADAS ON")
-        self.lbl_lane = QLabel("LANE LOCK")
+        self.lbl_lane = QLabel("♙  LANE LOCK")
+        self.lbl_fps = QLabel("FPS —")
         self.btn_play = QPushButton("⏸")
-        self.btn_open = QPushButton("Open")
-        for w in (self.lbl_time, self.lbl_gps, self.lbl_status, self.lbl_lane):
-            w.setStyleSheet("color: #8FB8D0; font-size: 11px;")
-            bot.addWidget(w)
-            if w is not self.lbl_lane:
-                bot.addSpacing(18)
+        self.btn_open = QPushButton("↗")
+        self.btn_full = QPushButton("⛶")
+        bot.addWidget(self.gear)
         bot.addStretch()
-        for b in (self.btn_play, self.btn_open):
+        chips = (self.lbl_time, self.lbl_gps, self.lbl_status, self.lbl_lane, self.lbl_fps)
+        for i, w in enumerate(chips):
+            w.setStyleSheet("color: #90A9BA; font-size: 11px; font-weight: 600;")
+            bot.addWidget(w)
+            if i < len(chips) - 1:
+                sep = QLabel("│")
+                sep.setStyleSheet("color: rgba(100,145,175,85); font-size: 11px;")
+                bot.addSpacing(14)
+                bot.addWidget(sep)
+                bot.addSpacing(14)
+        bot.addStretch()
+        for b in (self.btn_play, self.btn_open, self.btn_full):
             b.setObjectName("ctrl_btn")
+            b.setFixedSize(28, 22)
+            b.setStyleSheet(
+                "QPushButton{background:rgba(7,20,35,150);color:#8FB8D0;"
+                "border:1px solid rgba(62,200,255,80);border-radius:5px;font-size:10px;}"
+            )
             bot.addWidget(b)
+            bot.addSpacing(5)
         self.bottom.setStyleSheet("background: transparent;")
+        self.btn_full.setToolTip("Hide interface and expand the current view")
+        self.btn_full.clicked.connect(self.toggle_interface)
+
+        self.btn_restore = QPushButton("◱", self)
+        self.btn_restore.setFixedSize(40, 32)
+        self.btn_restore.setToolTip("Restore interface")
+        self.btn_restore.setStyleSheet(
+            "QPushButton{background:rgba(4,14,26,190);color:#BFEAFF;"
+            "border:1px solid rgba(62,200,255,150);border-radius:8px;font-size:17px;}"
+            "QPushButton:hover{border-color:#3EC8FF;background:rgba(8,28,48,225);}"
+        )
+        self.btn_restore.clicked.connect(self.toggle_interface)
+        self.btn_restore.hide()
 
         self.set_view("bev")
 
@@ -603,50 +709,85 @@ class HexCockpit(QWidget):
             bev.set_env_mode("night")
         elif key == "grid" and hasattr(bev, "toggle_cinematic_road"):
             bev.toggle_cinematic_road()
+        elif key == "full":
+            self.set_interface_visible(False)
         self.settings_wheel.close_menu()
         self.gear.set_active(False)
+
+    def toggle_interface(self):
+        self.set_interface_visible(self._full_view)
+
+    def set_interface_visible(self, visible):
+        """Show the cockpit chrome or expand the active BEV/live view to the full display."""
+        self._full_view = not bool(visible)
+        self.settings_wheel.close_menu()
+        self.gear.set_active(False)
+        chrome = (
+            self.bezel,
+            self.hex_stroke,
+            self.gauge,
+            self.lbl_limit,
+            self.gear,
+            self.bottom,
+        )
+        if self._full_view:
+            for widget in chrome:
+                widget.hide()
+            self.banner_fcw.hide()
+            self.banner_ldw.hide()
+            self.stack.clearMask()
+            self.stack.raise_()
+            self.btn_restore.show()
+            self.btn_restore.raise_()
+        else:
+            for widget in chrome:
+                widget.show()
+            viewport = _center_path(self.width(), self.height())
+            self.stack.setMask(QRegion(viewport.toFillPolygon().toPolygon()))
+            if self.banner_fcw._active:
+                self.banner_fcw.show()
+            if self.banner_ldw._active:
+                self.banner_ldw.show()
+            self.btn_restore.hide()
+            self.bezel.raise_()
+            self.hex_stroke.raise_()
+            self.gauge.raise_()
+            self.lbl_limit.raise_()
+            self.gear.raise_()
+            self.banner_fcw.raise_()
+            self.banner_ldw.raise_()
+            self.bottom.raise_()
+        self.update()
 
     def hex_polygon(self):
         return self.bezel.hex_polygon()
 
     def resizeEvent(self, event):
+        w, h = self.width(), self.height()
         self.stack.setGeometry(self.rect())
+        viewport = _center_path(w, h)
+        if self._full_view:
+            self.stack.clearMask()
+        else:
+            self.stack.setMask(QRegion(viewport.toFillPolygon().toPolygon()))
         self.bezel.setGeometry(self.rect())
         self.hex_stroke.setGeometry(self.rect())
         self.settings_wheel.setGeometry(self.rect())
         self.bezel.raise_()
-        w, h = self.width(), self.height()
-        cx, cy, rx, ry = _hex_metrics(w, h)
-        self._hex_pts = _flat_hex_points(cx, cy, rx, ry)
+        self._hex_pts = list(viewport.toFillPolygon())
         self.hex_stroke.set_points(self._hex_pts)
-        self.settings_wheel.set_hex(self._hex_pts)
+        self.settings_wheel.set_hex(viewport)
 
-        top_y = cy - ry
-        self.gauge.move(
-            int(cx - self.gauge.width() / 2),
-            int(top_y - 78),
-        )
+        lx, ly = int(w * 0.145), int(h * 0.40)
+        self.gauge.move(lx - self.gauge.width() // 2, ly - self.gauge.height() // 2)
+        self.lbl_limit.move(lx - self.lbl_limit.width() // 2, int(h * 0.66))
 
-        right = self._hex_pts[0]
-        top_right = self._hex_pts[5]
-        self.gear.move(
-            int(right.x() - self.gear.width() / 2),
-            int(right.y() - self.gear.height() / 2),
-        )
-        self.lbl_limit.adjustSize()
-        self.lbl_limit.setFixedWidth(110)
-        mx = (top_right.x() + right.x()) / 2.0
-        my = (top_right.y() + right.y()) / 2.0
-        self.lbl_limit.move(int(mx - 20), int(my - 70))
+        rx = int(w * 0.865)
+        self.banner_fcw.move(rx - self.banner_fcw.width() // 2, int(h * 0.29))
+        self.banner_ldw.move(rx - self.banner_ldw.width() // 2, int(h * 0.54))
 
-        left = self._hex_pts[3]
-        self.banner_fcw.move(int(left.x() - 10), int(left.y() - self.banner_fcw.height() / 2))
-        low_right = self._hex_pts[1]
-        lmx = (right.x() + low_right.x()) / 2.0
-        lmy = (right.y() + low_right.y()) / 2.0
-        self.banner_ldw.move(int(lmx - 40), int(lmy - 20))
-
-        self.bottom.setGeometry(int(cx - 280), int(cy + ry - 36), 560, 30)
+        self.bottom.setGeometry(int(w * 0.245), int(h * 0.842), int(w * 0.51), 62)
+        self.btn_restore.move(w - self.btn_restore.width() - 18, 18)
         self.hex_stroke.raise_()
         self.settings_wheel.raise_()
         self.gauge.raise_()
@@ -655,6 +796,9 @@ class HexCockpit(QWidget):
         self.banner_fcw.raise_()
         self.banner_ldw.raise_()
         self.bottom.raise_()
+        if self._full_view:
+            self.stack.raise_()
+            self.btn_restore.raise_()
         super().resizeEvent(event)
 
     def update_hud(self, *, speed_mps=None, cipo_obj=None, cipo_status="SAFE",
@@ -671,13 +815,13 @@ class HexCockpit(QWidget):
             n = int(round(float(live_limit)))
             _set_text(
                 self.lbl_limit,
-                f"SPEED LIMIT<br><span style='font-size:26px;font-weight:800;color:#F4FAFF'>{n}</span><br>LIMIT",
+                f"SPEED LIMIT<br><span style='font-size:25px;font-weight:800;color:#F4FAFF'>{n}</span>",
             )
         else:
             n = None
             _set_text(
                 self.lbl_limit,
-                "SPEED LIMIT<br><span style='font-size:26px;font-weight:800;color:#F4FAFF'>—</span><br>LIMIT",
+                "SPEED LIMIT<br><span style='font-size:25px;font-weight:800;color:#F4FAFF'>—</span>",
             )
 
         dist = None
@@ -688,8 +832,7 @@ class HexCockpit(QWidget):
         far_key = None if dist is None else int(round(float(dist)))
 
         fcw = str(alerts.get("fcw") or "OFF")
-        cipo = str(cipo_status or "SAFE")
-        fcw_on = fcw in ("FCW", "FCW+") or cipo in ("DANGER", "WARNING")
+        fcw_on = fcw in ("FCW", "FCW+")
         ttc = alerts.get("ttc")
         if fcw_on:
             if fcw == "FCW+":
@@ -699,19 +842,23 @@ class HexCockpit(QWidget):
             elif far_key is not None:
                 body = f"LEAD {far_key} m"
             else:
-                body = str(cipo)
+                body = "FORWARD"
             self.banner_fcw.set_trigger(True, "FCW", body)
         else:
             self.banner_fcw.set_trigger(False)
 
         ldw = str(alerts.get("ldw") or "OFF")
         side = str(alerts.get("ldw_side") or "")
-        ldw_on = ldw in ("LEFT", "RIGHT", "LDW") or side in ("LEFT", "RIGHT")
+        ldw_on = ldw in ("LEFT", "RIGHT") or side in ("LEFT", "RIGHT")
         if ldw_on:
             side_txt = side if side in ("LEFT", "RIGHT") else (ldw if ldw in ("LEFT", "RIGHT") else "")
             self.banner_ldw.set_trigger(True, "LDW", side_txt or "DEPARTURE")
         else:
             self.banner_ldw.set_trigger(False)
+
+        if self._full_view:
+            self.banner_fcw.hide()
+            self.banner_ldw.hide()
 
         minute = datetime.now().strftime("%H:%M")
         if minute != self._minute:
@@ -721,4 +868,8 @@ class HexCockpit(QWidget):
             fps_i = int(round(fps))
             if self._hud.get("fps") != fps_i:
                 self._hud["fps"] = fps_i
-        _set_text(self.lbl_lane, "LANE LOCK" if lane_ok else "LANE …")
+                _set_text(self.lbl_fps, f"FPS {fps_i}")
+        elif self._hud.get("fps") is not None:
+            self._hud["fps"] = None
+            _set_text(self.lbl_fps, "FPS —")
+        _set_text(self.lbl_lane, "♙  LANE LOCK" if lane_ok else "♙  LANE …")

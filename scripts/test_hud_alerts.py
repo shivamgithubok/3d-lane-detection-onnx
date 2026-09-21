@@ -33,6 +33,15 @@ def main():
         speed_mps=13.4,
         cipo_status="WARNING",
         cipo_obj={"Z_3d": 18.0},
+        alerts={"isa": {"posted_mph": 55}, "fcw": "OFF", "ldw": "OFF"},
+    )
+    assert not cockpit.banner_fcw.isVisible(), "CIPO warning alone must not show FCW"
+    assert not cockpit.banner_ldw.isVisible(), "LDW must wait for a real side trigger"
+
+    cockpit.update_hud(
+        speed_mps=13.4,
+        cipo_status="WARNING",
+        cipo_obj={"Z_3d": 18.0},
         alerts={"isa": {"posted_mph": 55, "candidate_mph": 55}, "fcw": "FCW", "range_m": 18, "ldw": "LEFT", "ldw_side": "LEFT"},
         fps=12,
         lane_ok=True,
