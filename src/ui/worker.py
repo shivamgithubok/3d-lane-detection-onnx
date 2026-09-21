@@ -266,6 +266,7 @@ class InferenceWorker(QThread):
                     "fcw": "OFF",
                     "priority": "none",
                     "ldw_side": None,
+                    "isa": self.isa.snapshot(),
                 }
 
                 if frame is not None and use_trt:
@@ -355,15 +356,16 @@ class InferenceWorker(QThread):
                         )
                         cipo_status = tracker.last_cipo_status
 
-                    alerts_snap = self.alerts.update(
-                        ego_left,
-                        ego_right,
-                        road_state.status,
-                        cipo_obj,
-                        cipo_status,
-                        speed_mps,
-                        dt=source_dt,
-                    )
+                alerts_snap = self.alerts.update(
+                    ego_left,
+                    ego_right,
+                    road_state.status,
+                    cipo_obj,
+                    cipo_status,
+                    speed_mps,
+                    dt=source_dt,
+                )
+                alerts_snap["isa"] = self.isa.snapshot()
 
                 # Step D: All rendering reads the same validated temporal road state.
                 if frame is None or not use_trt:
@@ -406,7 +408,7 @@ class InferenceWorker(QThread):
                     )
                     frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
                     # Downscale for UI transfer/paint (keeps HUD readable, cuts Qt cost)
-                    max_w = 960
+                    max_w = 800
                     if frame_rgb.shape[1] > max_w:
                         scale = max_w / float(frame_rgb.shape[1])
                         frame_rgb = cv2.resize(

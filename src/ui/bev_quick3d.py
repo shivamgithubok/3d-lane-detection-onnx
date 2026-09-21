@@ -269,6 +269,12 @@ class BevQuick3DWidget(QQuickWidget):
         self._set("envMode", self.env_mode)
         return self.env_mode
 
+    def enable_cluster_chrome(self):
+        """Hide in-QML badges/toolbar; the hexagonal cockpit draws HUD instead."""
+        self._set("clusterChrome", True)
+        self.set_env_mode("night")
+        self._set("scenicView", False)
+
     def set_calibration(self, pitch_deg, height_m):
         self._set("calibPitch", float(pitch_deg))
         self._set("calibH", float(height_m))
