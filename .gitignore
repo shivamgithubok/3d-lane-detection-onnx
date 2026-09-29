@@ -56,3 +56,6 @@ models/midas_small.onnx
 data/surround_view/
 scripts/test_surround_view.py
 src/surround_view/
+models/ufld_tusimple_288x800.onnx
+scripts/tusimple/
+src/inference/tusimple_ufld.py

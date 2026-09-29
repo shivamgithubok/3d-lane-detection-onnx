@@ -115,6 +115,7 @@ class ADASMainWindow(QMainWindow):
             alerts=alerts,
             fps=fps,
             lane_ok=(left_3d is not None and right_3d is not None),
+            objects=processed_objs,
         )
 
     @Slot(str)

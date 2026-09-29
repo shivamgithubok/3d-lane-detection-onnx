@@ -270,10 +270,10 @@ class BevQuick3DWidget(QQuickWidget):
         return self.env_mode
 
     def enable_cluster_chrome(self):
-        """Hide in-QML badges/toolbar; the hexagonal cockpit draws HUD instead."""
+        """Hide QML controls; the dashboard cockpit supplies its own HUD."""
         self._set("clusterChrome", True)
-        self.set_env_mode("night")
-        self._set("scenicView", False)
+        self.set_env_mode("day")
+        self._set("scenicView", True)
 
     def set_calibration(self, pitch_deg, height_m):
         self._set("calibPitch", float(pitch_deg))
@@ -771,10 +771,15 @@ class BevQuick3DWidget(QQuickWidget):
             self._set("edgeJson", edges)
 
     def reset_view(self):
+        self.set_dashboard_camera("chase")
+
+    def set_dashboard_camera(self, mode):
+        """Chase camera for ADAS View, steeper pitch for Bird's-Eye."""
+        bird = str(mode) == "bird"
         self._push_camera(
-            pitch=DEFAULT_VIEW_PITCH,
+            pitch=62.0 if bird else DEFAULT_VIEW_PITCH,
             yaw=DEFAULT_VIEW_YAW,
-            zoom=DEFAULT_ZOOM,
+            zoom=0.82 if bird else DEFAULT_ZOOM,
             calib_pitch=DEFAULT_CALIB_PITCH,
             calib_h=DEFAULT_CALIB_H,
             pan_x=0.0,

@@ -461,9 +461,15 @@ class BEVWidget(QWidget):
 
     def reset_view(self):
         """Resets camera to preferred BEV angle / zoom."""
-        self.pitch_deg = DEFAULT_VIEW_PITCH
+        self.set_dashboard_camera("chase")
+
+    def set_dashboard_camera(self, mode):
+        """Chase camera for ADAS View, steeper pitch for Bird's-Eye."""
+        bird = str(mode) == "bird"
+        self.pitch_deg = 62.0 if bird else DEFAULT_VIEW_PITCH
         self.yaw_deg = DEFAULT_VIEW_YAW
-        self.zoom_factor = DEFAULT_ZOOM
+        self.cam_h = 18.0 if bird else 10.0
+        self.zoom_factor = 0.82 if bird else DEFAULT_ZOOM
         self.pan_offset = QPointF(0, 0)
         self._invalidate_road_cache()
         self.update()

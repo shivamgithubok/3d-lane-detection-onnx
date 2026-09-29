@@ -1,34 +1,11 @@
-"""Curved dual-wing infotainment shell over the live ADAS BEV/camera pipeline."""
+"""Automotive dashboard cockpit over the live ADAS BEV / camera pipeline."""
 
 from __future__ import annotations
 
-import math
 from datetime import datetime
 
-from PySide6.QtCore import (
-    QEasingCurve,
-    Property,
-    QPoint,
-    QPropertyAnimation,
-    QRect,
-    QRectF,
-    QSize,
-    Qt,
-    QTimer,
-    Signal,
-)
-from PySide6.QtGui import (
-    QBrush,
-    QColor,
-    QFont,
-    QLinearGradient,
-    QPainter,
-    QPainterPath,
-    QPen,
-    QPixmap,
-    QPolygon,
-    QRegion,
-)
+from PySide6.QtCore import QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QRegion
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -39,86 +16,21 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-NAVY = QColor("#050A14")
 CYAN = QColor("#3EC8FF")
-ICE = QColor("#E8F4FF")
+ICE = QColor("#F4F7FB")
 WINDOW_W, WINDOW_H = 1280, 720
 
+VIEWS = (
+    ("adas", "ADAS View"),
+    ("front", "Front Camera"),
+)
 
-def _viewport_rect(w, h):
-    return QRectF(7, 7, w - 14, h - 14)
-
-
-def _viewport_path(w, h):
-    path = QPainterPath()
-    path.addRoundedRect(_viewport_rect(w, h), 18, 18)
-    return path
-
-
-def _wing_edge(w, h, right=False):
-    x = w * (0.76 if right else 0.24)
-    sign = -1.0 if right else 1.0
-    path = QPainterPath(QPoint(int(x), int(h * 0.18)))
-    path.cubicTo(
-        x + sign * w * 0.065, h * 0.30,
-        x + sign * w * 0.065, h * 0.68,
-        x, h * 0.80,
-    )
-    return path
-
-
-def _wing_path(w, h, right=False):
-    edge = _wing_edge(w, h, right)
-    if right:
-        path = QPainterPath(QPoint(int(w * 0.975), int(h * 0.07)))
-        path.lineTo(w * 0.76, h * 0.18)
-        path.connectPath(edge)
-        path.lineTo(w * 0.975, h * 0.90)
-    else:
-        path = QPainterPath(QPoint(int(w * 0.025), int(h * 0.07)))
-        path.lineTo(w * 0.24, h * 0.18)
-        path.connectPath(edge)
-        path.lineTo(w * 0.025, h * 0.90)
-    path.closeSubpath()
-    return path
-
-
-def _wing_border(w, h, right=False):
-    """Open inner border: upper sweep, concave edge, and lower sweep."""
-    if right:
-        path = QPainterPath(QPoint(int(w * 0.975), int(h * 0.07)))
-        path.lineTo(w * 0.76, h * 0.18)
-    else:
-        path = QPainterPath(QPoint(int(w * 0.025), int(h * 0.07)))
-        path.lineTo(w * 0.24, h * 0.18)
-    path.connectPath(_wing_edge(w, h, right))
-    path.lineTo(w * (0.975 if right else 0.025), h * 0.90)
-    return path
-
-
-def _center_path(w, h):
-    """Curved center opening used as the real BEV/live-video mask."""
-    left_x, right_x = w * 0.24, w * 0.76
-    top_y, bottom_y = h * 0.18, h * 0.80
-    path = QPainterPath(QPoint(int(left_x), int(top_y)))
-    # Upper boundary joins both wing edges without a gap.
-    path.cubicTo(w * 0.38, h * 0.10, w * 0.62, h * 0.10, right_x, top_y)
-    # Right concave wing edge.
-    path.cubicTo(
-        right_x - w * 0.065, h * 0.30,
-        right_x - w * 0.065, h * 0.68,
-        right_x, bottom_y,
-    )
-    # Lower boundary joins both wing edges without a gap.
-    path.cubicTo(w * 0.62, h * 0.88, w * 0.38, h * 0.88, left_x, bottom_y)
-    # Left concave wing edge, traversed upward.
-    path.cubicTo(
-        left_x + w * 0.065, h * 0.68,
-        left_x + w * 0.065, h * 0.30,
-        left_x, top_y,
-    )
-    path.closeSubpath()
-    return path
+_BTN = (
+    "QPushButton{background:#121A26;color:#D5DEE8;border:1px solid #2A3848;"
+    "border-radius:14px;padding:8px 10px;font-size:11px;font-weight:600;}"
+    "QPushButton:hover{border-color:#3EC8FF;}"
+    "QPushButton:checked{background:#0E3A62;color:#FFFFFF;border:1px solid #3EC8FF;}"
+)
 
 
 def _set_text(label, text):
@@ -126,191 +38,105 @@ def _set_text(label, text):
         label.setText(text)
 
 
-class HexBezel(QWidget):
-    """Cached curved shell and clipped honeycomb wings."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self._cache = None
-
-    def hex_polygon(self):
-        return QPolygon(_viewport_path(self.width(), self.height()).toFillPolygon().toPolygon())
-
-    def resizeEvent(self, event):
-        self._rebuild()
-        super().resizeEvent(event)
-
-    def _rebuild(self):
-        w, h = self.width(), self.height()
-        if w < 8 or h < 8:
-            return
-        self.clearMask()
-        self._cache = QPixmap(w, h)
-        self._cache.fill(Qt.transparent)
-        p = QPainter(self._cache)
-        p.setRenderHint(QPainter.Antialiasing, True)
-
-        for right in (False, True):
-            wing = _wing_path(w, h, right)
-            p.save()
-            p.setClipPath(wing)
-            p.fillPath(wing, QColor("#071426"))
-            self._paint_honeycomb(p, w, h, right)
-            p.restore()
-
-        outer = QRectF(6, 6, w - 12, h - 12)
-        for width, alpha in ((7, 16), (1.6, 85)):
-            glow = QColor("#244D72")
-            glow.setAlpha(alpha)
-            p.setPen(QPen(glow, width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            p.setBrush(Qt.NoBrush)
-            p.drawRoundedRect(outer, 18, 18)
-
-        self._draw_dark_rail(p, w, h, top=True)
-        self._draw_dark_rail(p, w, h, top=False)
-        p.end()
-        self.update()
-
-    def _draw_dark_rail(self, p, w, h, top):
-        """Center boundary joins the left and right wing corners exactly."""
-        y = h * (0.18 if top else 0.80)
-        ctrl = h * (0.10 if top else 0.88)
-        path = QPainterPath(QPoint(int(w * 0.24), int(y)))
-        path.cubicTo(w * 0.38, ctrl, w * 0.62, ctrl, w * 0.76, y)
-        p.setPen(QPen(QColor(20, 64, 92, 175), 1.25, Qt.SolidLine, Qt.RoundCap))
-        p.setBrush(Qt.NoBrush)
-        p.drawPath(path)
-
-    def paintEvent(self, event):
-        if self._cache is None:
-            return
-        QPainter(self).drawPixmap(0, 0, self._cache)
-
-    def _paint_honeycomb(self, painter, w, h, right=False):
-        r = 18.0
-        dx = r * math.sqrt(3)
-        dy = r * 1.5
-        # Cells brighten smoothly toward each wing's inner curved edge.
-        if right:
-            gradient = QLinearGradient(w, 0, w * 0.74, 0)
-        else:
-            gradient = QLinearGradient(0, 0, w * 0.26, 0)
-        gradient.setColorAt(0.0, QColor(38, 88, 128, 48))
-        gradient.setColorAt(0.68, QColor(55, 125, 174, 105))
-        gradient.setColorAt(1.0, QColor(92, 185, 224, 175))
-        painter.setPen(QPen(QBrush(gradient), 1.15))
-        painter.setBrush(Qt.NoBrush)
-        rows = int(h / dy) + 2
-        cols = int(w / dx) + 2
-        for row in range(rows):
-            oy = row * dy
-            ox0 = dx * 0.5 if row % 2 else 0.0
-            for col in range(cols):
-                x = col * dx + ox0
-                y = oy
-                path = QPainterPath()
-                for i in range(6):
-                    ang = math.radians(30 + i * 60)
-                    px = x + r * math.cos(ang)
-                    py = y + r * math.sin(ang)
-                    if i == 0:
-                        path.moveTo(px, py)
-                    else:
-                        path.lineTo(px, py)
-                path.closeSubpath()
-                painter.drawPath(path)
+def _stage_rect(w, h):
+    # Keep a clean gutter after the left instrument column.
+    return QRectF(w * 0.24, h * 0.078, w * 0.54, h * 0.775)
 
 
-class HexStroke(QWidget):
-    """Unmasked cyan inner wing edges over the live viewport."""
+class DonutGauge(QWidget):
+    """Open donut, 0–120 km/h, matching the cockpit reference."""
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self._size = QSize()
-
-    def set_points(self, pts):
-        self.update()
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        for right in (False, True):
-            path = _wing_border(self.width(), self.height(), right)
-            for width, alpha in ((10, 24), (2.2, 215)):
-                glow = QColor(CYAN)
-                glow.setAlpha(alpha)
-                p.setPen(QPen(glow, width, Qt.SolidLine, Qt.RoundCap))
-                p.setBrush(Qt.NoBrush)
-                p.drawPath(path)
-        p.end()
-
-
-class SpeedGauge(QWidget):
-    """Reference-style full donut gauge."""
-
-    _VMAX = 160.0
+    _VMAX = 120.0
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._kmh = 0.0
         self._shown = 0
-        self.setFixedSize(220, 220)
+        self.setFixedSize(292, 292)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
 
     def set_kmh(self, kmh):
-        v = 0.0 if kmh is None else max(0.0, float(kmh))
-        shown = int(round(v))
-        if shown == self._shown:
+        value = 0.0 if kmh is None else max(0.0, float(kmh))
+        shown = int(round(value))
+        if shown == self._shown and abs(value - self._kmh) < 0.2:
             return
         self._shown = shown
-        self._kmh = v
+        self._kmh = value
         self.update()
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        cx = cy = self.width() / 2.0
-        r = 78.0
-        ring = QRectF(cx - r, cy - r, r * 2, r * 2)
-
+        side = self.width()
+        ring = QRectF(32, 32, side - 64, side - 64)
+        start = 220 * 16
+        sweep = -260 * 16
+        p.setPen(QPen(QColor(38, 52, 68), 18, Qt.SolidLine, Qt.RoundCap))
         p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(25, 72, 120, 200), 14, Qt.SolidLine, Qt.RoundCap))
-        p.drawEllipse(ring)
-
-        for i in range(8):
-            deg = i * 45.0
-            rad = math.radians(deg)
-            r0, r1 = r + 15, r + 23
-            x0 = cx + r0 * math.cos(rad)
-            y0 = cy - r0 * math.sin(rad)
-            x1 = cx + r1 * math.cos(rad)
-            y1 = cy - r1 * math.sin(rad)
-            p.setPen(QPen(QColor(175, 220, 245, 170), 2))
-            p.drawLine(QPoint(int(x0), int(y0)), QPoint(int(x1), int(y1)))
-
+        p.drawArc(ring, start, sweep)
         frac = min(1.0, self._kmh / self._VMAX)
         if frac > 0.01:
-            fill_span = int(-360 * frac * 16)
-            p.setPen(QPen(QColor(40, 160, 255, 75), 22, Qt.SolidLine, Qt.RoundCap))
-            p.drawArc(ring, 90 * 16, fill_span)
-            p.setPen(QPen(CYAN, 13, Qt.SolidLine, Qt.RoundCap))
-            p.drawArc(ring, 90 * 16, fill_span)
-
+            p.setPen(QPen(QColor(40, 150, 255, 70), 26, Qt.SolidLine, Qt.RoundCap))
+            p.drawArc(ring, start, int(sweep * frac))
+            p.setPen(QPen(CYAN, 16, Qt.SolidLine, Qt.RoundCap))
+            p.drawArc(ring, start, int(sweep * frac))
+        p.setPen(QColor("#9AABBC"))
+        p.setFont(QFont("Segoe UI", 11, QFont.DemiBold))
+        p.drawText(QRect(8, 218, 54, 24), Qt.AlignCenter, "0")
+        p.drawText(QRect(side - 62, 218, 54, 24), Qt.AlignCenter, "120")
         p.setPen(ICE)
-        p.setFont(QFont("Segoe UI", 46, QFont.Normal))
-        p.drawText(QRect(0, 66, self.width(), 60), Qt.AlignCenter, f"{self._shown}")
-        p.setPen(QColor("#9EC8E0"))
-        p.setFont(QFont("Segoe UI", 13))
-        p.drawText(QRect(0, 126, self.width(), 24), Qt.AlignCenter, "km/h")
+        p.setFont(QFont("Segoe UI", 62, QFont.Normal))
+        p.drawText(QRect(0, 92, side, 78), Qt.AlignCenter, str(self._shown))
+        p.setPen(QColor("#9AABBC"))
+        p.setFont(QFont("Segoe UI", 14))
+        p.drawText(QRect(0, 168, side, 26), Qt.AlignCenter, "km/h")
+        p.end()
+
+
+class LimitSign(QWidget):
+    """Posted speed-limit disc. text() is the live number for HUD checks."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._value = None
+        self.setFixedSize(88, 104)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+
+    def set_limit(self, value):
+        shown = None if value is None else int(round(float(value)))
+        if shown == self._value:
+            return
+        self._value = shown
+        self.update()
+
+    def text(self):
+        return "—" if self._value is None else str(self._value)
+
+    def setText(self, text):
+        digits = "".join(ch for ch in str(text) if ch.isdigit())
+        self.set_limit(int(digits) if digits else None)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        disc = QRectF(9, 3, 70, 70)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#F7F7F7"))
+        p.drawEllipse(disc)
+        p.setPen(QPen(QColor("#E10600"), 6))
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(disc.adjusted(3, 3, -3, -3))
+        p.setPen(QColor("#111111"))
+        p.setFont(QFont("Segoe UI", 20, QFont.Bold))
+        p.drawText(disc, Qt.AlignCenter, self.text())
+        p.setPen(QColor("#D6DEE8"))
+        p.setFont(QFont("Segoe UI", 9, QFont.DemiBold))
+        p.drawText(QRectF(0, 78, self.width(), 18), Qt.AlignCenter, "Speed Limit")
         p.end()
 
 
 class TriggerBanner(QWidget):
-    """Edge HUD chip: FCW (left) or LDW (right). Hidden until the tracker fires."""
+    """Compact alert chip. Hidden until the tracker fires."""
 
     def __init__(self, kind="fcw", parent=None):
         super().__init__(parent)
@@ -318,16 +144,9 @@ class TriggerBanner(QWidget):
         self._title = "FCW" if kind == "fcw" else "LDW"
         self._body = ""
         self._active = False
-        self._pulse = 0.0
-        self.setFixedSize(210, 94)
+        self.setFixedSize(210, 36)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
         self.hide()
-
-    def _tick(self):
-        self._pulse = (self._pulse + 0.12) % (2.0 * math.pi)
-        self.update()
 
     def set_trigger(self, on, title=None, body=""):
         self._active = bool(on)
@@ -337,245 +156,171 @@ class TriggerBanner(QWidget):
         if on:
             if not self.isVisible():
                 self.show()
-                self._timer.start(50)
             self.raise_()
             self.update()
         elif self.isVisible():
             self.hide()
-            self._timer.stop()
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         hot = self._kind == "fcw"
-        border = QColor("#FF9348")
-        card = QRectF(7, 7, self.width() - 14, self.height() - 14)
-        path = QPainterPath()
-        path.addRoundedRect(card, 13, 13)
-        pulse = int(22 + 18 * abs(math.sin(self._pulse)))
-        p.setPen(QPen(QColor(255, 120, 50, pulse), 9))
-        p.setBrush(Qt.NoBrush)
-        p.drawPath(path)
-        p.setPen(QPen(border, 2.2))
-        p.setBrush(QColor(18, 15, 20, 220))
-        p.drawPath(path)
-        if hot:
-            shield = QPainterPath(QPoint(38, 24))
-            shield.lineTo(56, 31)
-            shield.cubicTo(55, 57, 48, 67, 38, 73)
-            shield.cubicTo(28, 67, 21, 57, 20, 31)
-            shield.closeSubpath()
-            p.setPen(QPen(border, 3))
-            p.setBrush(Qt.NoBrush)
-            p.drawPath(shield)
-            p.drawLine(QPoint(29, 47), QPoint(36, 54))
-            p.drawLine(QPoint(36, 54), QPoint(48, 40))
-            p.setPen(ICE)
-            p.setFont(QFont("Segoe UI", 18, QFont.Bold))
-            p.drawText(QRect(70, 20, 130, 34), Qt.AlignLeft | Qt.AlignVCenter, self._title)
-            p.setPen(QColor("#D6D5D8"))
-            p.setFont(QFont("Segoe UI", 10))
-            p.drawText(QRect(70, 51, 130, 22), Qt.AlignLeft | Qt.AlignVCenter, self._body)
-        else:
-            text = f"{self._title} {self._body}".strip()
-            p.setPen(ICE)
-            p.setFont(QFont("Segoe UI", 17, QFont.Bold))
-            p.drawText(card, Qt.AlignCenter, text)
+        color = QColor("#FF6A3D") if hot else QColor("#FFC14A")
+        card = QRectF(1, 1, self.width() - 2, self.height() - 2)
+        p.setPen(QPen(color, 1.6))
+        p.setBrush(QColor(18, 14, 12, 220))
+        p.drawRoundedRect(card, 8, 8)
+        p.setPen(ICE)
+        p.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        label = self._title if not self._body else f"{self._title}  {self._body}"
+        p.drawText(card, Qt.AlignCenter, label)
         p.end()
 
 
-class SettingsGear(QWidget):
-    """Icon-only 2x2 feature launcher."""
-
-    clicked = Signal()
+class ObjectOverlay(QWidget):
+    """Lightweight projected object boxes over the ADAS chase view."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(62, 62)
-        self.setCursor(Qt.PointingHandCursor)
+        self._objects = []
+        self._stage = QRectF()
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self._angle = 0.0
-        self._fast = False
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
 
-    def set_active(self, on):
-        self._fast = bool(on)
+    def set_stage(self, rect):
+        self._stage = QRectF(rect)
         self.update()
 
-    def _tick(self):
-        self._angle = (self._angle + 1.0) % 360.0
+    def set_objects(self, objects):
+        rows = []
+        for obj in objects or []:
+            try:
+                z = float(obj.get("Z_3d", 0.0))
+                x = float(obj.get("X_3d", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if 4.0 <= z <= 75.0 and abs(x) <= 8.0:
+                rows.append((z, x, bool(obj.get("is_cipo"))))
+        self._objects = sorted(rows)[:3]
         self.update()
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.clicked.emit()
-        super().mousePressEvent(event)
 
     def paintEvent(self, event):
+        if self._stage.isEmpty():
+            return
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        tile = QRectF(5, 5, 52, 52)
-        p.setPen(QPen(CYAN, 2))
-        p.setBrush(QColor(7, 24, 43, 225 if self._fast else 185))
-        p.drawRoundedRect(tile, 15, 15)
-        p.setPen(QPen(ICE if self._fast else CYAN, 1.8))
-        p.setBrush(Qt.NoBrush)
-        size, gap = 10.0, 7.0
-        x0 = y0 = 5 + (52 - (size * 2 + gap)) / 2
-        for row in range(2):
-            for col in range(2):
-                p.drawRoundedRect(
-                    QRectF(x0 + col * (size + gap), y0 + row * (size + gap), size, size),
-                    2, 2,
-                )
+        stage = self._stage
+        for z, x, is_cipo in self._objects:
+            depth = min(1.0, max(0.0, (z - 4.0) / 71.0))
+            perspective = depth ** 0.62
+            cy = stage.bottom() - stage.height() * (0.20 + 0.62 * perspective)
+            lateral_scale = stage.width() * (0.070 - 0.035 * depth)
+            cx = stage.center().x() + x * lateral_scale
+            box_w = max(34.0, 92.0 - z * 0.75)
+            box_h = box_w * 0.62
+            rect = QRectF(cx - box_w / 2, cy - box_h / 2, box_w, box_h)
+            color = QColor("#31E6A1") if not is_cipo else QColor("#52F2B2")
+            p.setPen(QPen(QColor(49, 230, 161, 55), 7))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(rect, 4, 4)
+            p.setPen(QPen(color, 1.8))
+            p.drawRoundedRect(rect, 4, 4)
+            label = QRectF(rect.left(), rect.bottom() + 4, rect.width(), 20)
+            p.setPen(QColor("#EAF7F2"))
+            p.setFont(QFont("Segoe UI", 10, QFont.DemiBold))
+            p.drawText(label, Qt.AlignCenter, f"{int(round(z))} m")
         p.end()
 
 
-class SettingsWheel(QWidget):
-    """Frosted cards that rise from the bottom; scroll to choose, tap to confirm."""
+class SettingsButton(QPushButton):
+    def __init__(self, parent=None):
+        super().__init__("⚙   Settings", parent)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(148, 52)
+        self._on = False
+        self._apply()
+
+    def set_active(self, on):
+        self._on = bool(on)
+        self._apply()
+
+    def _apply(self):
+        border = "#3EC8FF" if self._on else "#314154"
+        bg = "#12324E" if self._on else "#121A26"
+        self.setStyleSheet(
+            "QPushButton{background:%s;color:#F2F6FB;border:1px solid %s;"
+            "border-radius:16px;font-size:13px;font-weight:700;}"
+            "QPushButton:hover{border-color:#3EC8FF;}" % (bg, border)
+        )
+
+
+class SettingsSheet(QFrame):
+    """View picker opened by the Settings button."""
 
     confirmed = Signal(str)
 
-    ITEMS = (
-        ("night", "NIGHT MODE"),
-        ("grid", "GRID HUD"),
-        ("bev", "ADAS BEV"),
-        ("live", "LIVE VIEW"),
-        ("full", "FULL VIEW"),
-    )
-
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self._index = 2
-        self._rise = 0.0
-        self._clip = QPainterPath()
-        self._anim = None
+        self.setObjectName("settings_sheet")
+        self.setStyleSheet(
+            "QFrame#settings_sheet{background:rgba(14,20,30,242);"
+            "border:1px solid rgba(120,170,210,80);border-radius:18px;}"
+            "QLabel{color:#E8EEF6;background:transparent;}"
+            + _BTN
+        )
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(10)
+        head = QHBoxLayout()
+        title = QLabel("View Mode")
+        title.setStyleSheet("font-size:16px;font-weight:700;color:#F4F7FB;")
+        close = QPushButton("✕")
+        close.setFixedSize(28, 28)
+        close.setStyleSheet(
+            "QPushButton{background:transparent;color:#C5D0DC;border:none;font-size:14px;}"
+        )
+        close.clicked.connect(self.close_menu)
+        head.addWidget(title)
+        head.addStretch()
+        head.addWidget(close)
+        root.addLayout(head)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.view_buttons = {}
+        for key, label in VIEWS:
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setMinimumHeight(64)
+            button.clicked.connect(lambda _=False, k=key: self.confirmed.emit(k))
+            row.addWidget(button)
+            self.view_buttons[key] = button
+        root.addLayout(row)
+
+        more = QLabel("More Settings")
+        more.setStyleSheet("color:#9AABBC;font-size:12px;font-weight:600;")
+        root.addWidget(more)
+        extra = QHBoxLayout()
+        for key, label in (("night", "Night Mode"), ("grid", "Grid HUD"), ("full", "Full View")):
+            button = QPushButton(label)
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(lambda _=False, k=key: self.confirmed.emit(k))
+            extra.addWidget(button)
+        root.addLayout(extra)
+
+        self.tools = QHBoxLayout()
+        root.addLayout(self.tools)
+        self.mode_slot = QVBoxLayout()
+        root.addLayout(self.mode_slot)
         self.hide()
-
-    def _get_rise(self):
-        return self._rise
-
-    def _set_rise(self, v):
-        self._rise = float(v)
-        self.update()
-
-    rise = Property(float, _get_rise, _set_rise)
-
-    def set_hex(self, pts):
-        if isinstance(pts, QPainterPath):
-            self._clip = QPainterPath(pts)
-            return
-        self._clip = QPainterPath()
-        if pts:
-            polygon = QPolygon([QPoint(int(p.x()), int(p.y())) for p in pts])
-            self._clip.addPolygon(polygon)
 
     def open_menu(self):
         self.show()
         self.raise_()
-        if self._anim is not None:
-            self._anim.stop()
-        self._rise = 0.0
-        self._anim = QPropertyAnimation(self, b"rise", self)
-        self._anim.setDuration(480)
-        self._anim.setStartValue(0.0)
-        self._anim.setEndValue(1.0)
-        self._anim.setEasingCurve(QEasingCurve.OutCubic)
-        self._anim.start()
 
     def close_menu(self):
-        if self._anim is not None:
-            self._anim.stop()
         self.hide()
-        self._rise = 0.0
-
-    def wheelEvent(self, event):
-        dy = event.angleDelta().y()
-        if dy > 0:
-            self._index = max(0, self._index - 1)
-        elif dy < 0:
-            self._index = min(len(self.ITEMS) - 1, self._index + 1)
-        self.update()
-        event.accept()
-
-    def mousePressEvent(self, event):
-        if event.button() != Qt.LeftButton:
-            return
-        key, _ = self.ITEMS[self._index]
-        self.confirmed.emit(key)
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        if not self._clip.isEmpty():
-            p.setClipPath(self._clip)
-        cx = self.width() / 2.0
-        cy = self.height() * 0.50
-        n = len(self.ITEMS)
-        order = [i for i in range(n) if i != self._index] + [self._index]
-        for i in order:
-            self._paint_card(p, cx, cy, i, i - self._index)
-        p.setClipping(False)
-        p.setPen(QColor(180, 220, 245, int(210 * self._rise)))
-        p.setFont(QFont("Segoe UI", 9, QFont.DemiBold))
-        p.drawText(
-            QRect(0, int(self.height() * 0.78), self.width(), 22),
-            Qt.AlignCenter,
-            "SCROLL TO CHOOSE  ·  TAP TO CONFIRM",
-        )
-        p.end()
-
-    def _paint_card(self, p, cx, cy, i, rel):
-        t = self._rise
-        y = cy + rel * 56.0 + (1.0 - t) * (220.0 + abs(rel) * 36.0)
-        focus = rel == 0
-        scale = 0.82 + 0.18 * t
-        if rel < 0:
-            w, h = (270.0 + (22 if rel == -1 else 0)) * scale, 45.0 * scale
-        elif rel > 0:
-            w, h = 430.0 * scale, 72.0 * scale
-            y += 8
-        else:
-            w, h = 370.0 * scale, 82.0 * scale
-        alpha_fill = int((112 if focus else 58) * t)
-        alpha_border = int((245 if focus else 125) * t)
-        slant = (14.0 if rel >= 0 else 8.0) * scale
-        poly = QPolygon(
-            [
-                QPoint(int(cx - w / 2 + slant), int(y - h / 2)),
-                QPoint(int(cx + w / 2 - slant), int(y - h / 2)),
-                QPoint(int(cx + w / 2), int(y + h / 2)),
-                QPoint(int(cx - w / 2), int(y + h / 2)),
-            ]
-        )
-        path = QPainterPath()
-        path.addPolygon(poly)
-        path.closeSubpath()
-        p.setPen(QPen(QColor(90, 210, 255, alpha_border), 2.4 if focus else 1.3))
-        p.setBrush(QColor(10, 32, 52, alpha_fill))
-        p.drawPath(path)
-        if focus and t > 0.2:
-            p.setPen(QPen(QColor(62, 200, 255, 55), 10))
-            p.setBrush(Qt.NoBrush)
-            p.drawPath(path)
-            p.setPen(QPen(QColor(90, 210, 255, alpha_border), 2.4))
-            p.setBrush(QColor(10, 32, 52, alpha_fill))
-            p.drawPath(path)
-        rect = poly.boundingRect()
-        key, label = self.ITEMS[i]
-        p.setPen(QColor(230, 245, 255, int(245 * t)))
-        if focus:
-            p.setFont(QFont("Segoe UI", 16, QFont.Bold))
-            p.drawText(rect.adjusted(40, 4, -12, -28), Qt.AlignVCenter | Qt.AlignLeft, "✓  " + label)
-            p.setFont(QFont("Segoe UI", 10))
-            p.setPen(QColor(160, 210, 235, int(210 * t)))
-            if key == "bev":
-                p.drawText(rect.adjusted(68, 30, -12, -4), Qt.AlignLeft | Qt.AlignVCenter, "LANE TRACK")
-        else:
-            p.setFont(QFont("Segoe UI", 11, QFont.DemiBold))
-            p.drawText(rect, Qt.AlignCenter, label)
 
 
 class HexCockpit(QWidget):
@@ -585,104 +330,160 @@ class HexCockpit(QWidget):
         super().__init__(parent)
         self.setObjectName("hex_cockpit")
         self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet("#hex_cockpit{background:#02050C;}")
+        self.setStyleSheet("#hex_cockpit{background:#05070C;}")
         self._view = "bev"
+        self._mode = "adas"
         self._full_view = False
-        self._hex_pts = []
-        self._hud = {}
         self._minute = ""
+        self._fps = None
 
         self.stack = QStackedWidget(self)
         self.bev_widget = bev_widget
         self.stack.addWidget(bev_widget)
-
         self.lbl_camera = QLabel("Live view")
         self.lbl_camera.setAlignment(Qt.AlignCenter)
-        self.lbl_camera.setStyleSheet("background: #000; color: #7A93A8;")
+        self.lbl_camera.setStyleSheet("background:#000;color:#7A93A8;")
         self.lbl_camera.setScaledContents(True)
         self.stack.addWidget(self.lbl_camera)
 
-        self.bezel = HexBezel(self)
-        self.hex_stroke = HexStroke(self)
-
-        self.gauge = SpeedGauge(self)
-        self.lbl_limit = QLabel("SPEED LIMIT<br><span style='font-size:25px'>—</span>")
-        self.lbl_limit.setAlignment(Qt.AlignCenter)
-        self.lbl_limit.setParent(self)
-        self.lbl_limit.setTextFormat(Qt.RichText)
-        self.lbl_limit.setFixedSize(114, 62)
-        self.lbl_limit.setStyleSheet(
-            "QLabel{color:#9FC9E3; font-size:10px; font-weight:700;"
-            "background:rgba(8,27,47,185); border:1px solid rgba(62,200,255,145);"
-            "border-radius:12px; padding-top:3px;}"
-        )
-
+        self.gauge = DonutGauge(self)
+        self.lbl_limit = LimitSign(self)
         self.banner_fcw = TriggerBanner("fcw", self)
         self.banner_ldw = TriggerBanner("ldw", self)
 
-        self.settings_wheel = SettingsWheel(self)
-        self.settings_wheel.confirmed.connect(self._on_menu_choice)
+        self.topbar = QFrame(self)
+        self.topbar.setStyleSheet("background:transparent;")
+        top = QHBoxLayout(self.topbar)
+        top.setContentsMargins(0, 0, 0, 0)
+        top.addStretch()
+        self.lbl_range = QLabel("▣  Range —")
+        self.lbl_clock = QLabel("—")
+        self.lbl_date = QLabel("—")
+        self.lbl_temp = QLabel("28°C")
+        sep = QLabel("|")
+        for label in (self.lbl_range, self.lbl_clock, sep, self.lbl_date, self.lbl_temp):
+            label.setStyleSheet("color:#D5DEE8;font-size:14px;font-weight:600;background:transparent;")
+        self.lbl_clock.setMinimumWidth(120)
+        self.lbl_date.setMinimumWidth(150)
+        self.lbl_clock.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.lbl_date.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        top.addWidget(self.lbl_range)
+        top.addSpacing(22)
+        top.addWidget(self.lbl_clock)
+        top.addSpacing(16)
+        top.addWidget(sep)
+        top.addSpacing(16)
+        top.addWidget(self.lbl_date)
+        top.addSpacing(22)
+        top.addWidget(self.lbl_temp)
+        top.addStretch()
+        self.lbl_fps = QLabel("FPS —")
+        self.lbl_fps.setStyleSheet("color:#C5D0DC;font-size:13px;font-weight:600;background:transparent;")
 
-        self.gear = SettingsGear(self)
+        self.status_card = QFrame(self)
+        self.status_card.setStyleSheet(
+            "QFrame{background:rgba(10,16,26,210);border:1px solid #243244;border-radius:18px;}"
+            "QLabel{background:transparent;border:none;}"
+        )
+        card = QVBoxLayout(self.status_card)
+        card.setContentsMargins(16, 14, 16, 16)
+        card.setSpacing(8)
+        self.lbl_drive = QLabel("D")
+        self.lbl_drive.setAlignment(Qt.AlignCenter)
+        self.lbl_drive.setStyleSheet("color:#F4F7FB;font-size:30px;font-weight:600;")
+        self.lbl_drive_sub = QLabel("NORMAL")
+        self.lbl_drive_sub.setAlignment(Qt.AlignCenter)
+        self.lbl_drive_sub.setStyleSheet("color:#8FA0B3;font-size:11px;font-weight:700;")
+        card.addWidget(self.lbl_drive)
+        card.addWidget(self.lbl_drive_sub)
+        card.addSpacing(8)
+
+        self.dot_lane = QLabel("●")
+        self.dot_fcw = QLabel("●")
+        self.dot_sign = QLabel("●")
+        self.dot_obj = QLabel("●")
+        self._status_rows = (
+            (self.dot_lane, "╱╲   Lane Keeping"),
+            (self.dot_fcw, "▣   Forward Collision"),
+            (self.dot_sign, "◉   Traffic Sign"),
+            (self.dot_obj, "▤   Object Detection"),
+        )
+        self._name_labels = []
+        for dot, name in self._status_rows:
+            row = QHBoxLayout()
+            label = QLabel(name)
+            label.setStyleSheet("color:#E6EDF5;font-size:13px;font-weight:600;")
+            dot.setStyleSheet("color:#5C6B7A;font-size:16px;")
+            row.addWidget(label)
+            row.addStretch()
+            row.addWidget(dot)
+            card.addLayout(row)
+            self._name_labels.append((dot, label))
+
+        self.settings_wheel = SettingsSheet(self)
+        self.settings_wheel.confirmed.connect(self._on_menu_choice)
+        self.gear = SettingsButton(self)
         self.gear.clicked.connect(self._toggle_settings)
         self.btn_settings = self.gear
 
-        self.mode_panel = QFrame(self)
-        self.mode_panel.hide()
+        self.mode_panel = QFrame(self.settings_wheel)
+        self.settings_wheel.mode_slot.addWidget(self.mode_panel)
         QVBoxLayout(self.mode_panel)
 
-        self.bottom = QFrame(self)
-        bot = QHBoxLayout(self.bottom)
-        bot.setContentsMargins(4, 0, 8, 0)
-        self.lbl_time = QLabel("◷  —")
-        self.lbl_gps = QLabel("GPS")
-        self.lbl_status = QLabel("●  ADAS ON")
-        self.lbl_lane = QLabel("♙  LANE LOCK")
-        self.lbl_fps = QLabel("FPS —")
-        self.btn_play = QPushButton("⏸")
-        self.btn_open = QPushButton("↗")
-        self.btn_full = QPushButton("⛶")
-        bot.addWidget(self.gear)
-        bot.addStretch()
-        chips = (self.lbl_time, self.lbl_gps, self.lbl_status, self.lbl_lane, self.lbl_fps)
-        for i, w in enumerate(chips):
-            w.setStyleSheet("color: #90A9BA; font-size: 11px; font-weight: 600;")
-            bot.addWidget(w)
-            if i < len(chips) - 1:
-                sep = QLabel("│")
-                sep.setStyleSheet("color: rgba(100,145,175,85); font-size: 11px;")
-                bot.addSpacing(14)
-                bot.addWidget(sep)
-                bot.addSpacing(14)
-        bot.addStretch()
-        for b in (self.btn_play, self.btn_open, self.btn_full):
-            b.setObjectName("ctrl_btn")
-            b.setFixedSize(28, 22)
-            b.setStyleSheet(
-                "QPushButton{background:rgba(7,20,35,150);color:#8FB8D0;"
-                "border:1px solid rgba(62,200,255,80);border-radius:5px;font-size:10px;}"
-            )
-            bot.addWidget(b)
-            bot.addSpacing(5)
-        self.bottom.setStyleSheet("background: transparent;")
-        self.btn_full.setToolTip("Hide interface and expand the current view")
-        self.btn_full.clicked.connect(self.toggle_interface)
+        self.btn_play = QPushButton("Pause")
+        self.btn_open = QPushButton("Open")
+        self.btn_full = self.btn_play
+        for button in (self.btn_play, self.btn_open):
+            button.setCursor(Qt.PointingHandCursor)
+            self.settings_wheel.tools.addWidget(button)
 
-        self.btn_restore = QPushButton("◱", self)
-        self.btn_restore.setFixedSize(40, 32)
-        self.btn_restore.setToolTip("Restore interface")
+        self._view_btns = {}
+        self.bottom = QFrame(self)
+        self.bottom.setStyleSheet("background:transparent;")
+        bot = QHBoxLayout(self.bottom)
+        bot.setContentsMargins(8, 0, 8, 0)
+        bot.setSpacing(8)
+        bot.addWidget(self.lbl_fps)
+        bot.addStretch()
+        for key, label in VIEWS:
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setMinimumSize(180, 52)
+            button.setStyleSheet(_BTN)
+            button.clicked.connect(lambda _=False, k=key: self.set_mode(k))
+            bot.addWidget(button)
+            self._view_btns[key] = button
+        bot.addStretch()
+        # Settings remain available programmatically, but the dashboard button
+        # is intentionally omitted to keep the lower-right area uncluttered.
+        self.gear.hide()
+
+        self.btn_restore = QPushButton("Restore", self)
+        self.btn_restore.setFixedSize(92, 34)
+        self.btn_restore.setCursor(Qt.PointingHandCursor)
         self.btn_restore.setStyleSheet(
-            "QPushButton{background:rgba(4,14,26,190);color:#BFEAFF;"
-            "border:1px solid rgba(62,200,255,150);border-radius:8px;font-size:17px;}"
-            "QPushButton:hover{border-color:#3EC8FF;background:rgba(8,28,48,225);}"
+            "QPushButton{background:rgba(8,16,28,210);color:#E8F4FF;"
+            "border:1px solid #3EC8FF;border-radius:10px;font-weight:700;}"
         )
         self.btn_restore.clicked.connect(self.toggle_interface)
         self.btn_restore.hide()
 
-        self.set_view("bev")
+        self._paint_status_dots(False, False, False, False)
+        self.set_mode("adas")
 
     def sizeHint(self):
         return QSize(WINDOW_W, WINDOW_H)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(self.rect(), QColor("#05070C"))
+        inner = QRectF(8, 6, self.width() - 16, self.height() - 12)
+        p.setPen(QPen(QColor("#243140"), 1.4))
+        p.setBrush(QColor("#0B1018"))
+        p.drawRoundedRect(inner, 26, 26)
+        p.end()
 
     def set_view(self, mode):
         self._view = "live" if mode == "live" else "bev"
@@ -691,6 +492,18 @@ class HexCockpit(QWidget):
             self.bev_widget.setUpdatesEnabled(self._view == "bev")
         self.view_changed.emit(self._view)
 
+    def set_mode(self, mode):
+        self._mode = mode if mode in dict(VIEWS) else "adas"
+        if self._mode in ("live", "front"):
+            self.set_view("live")
+        else:
+            self.set_view("bev")
+            if hasattr(self.bev_widget, "set_dashboard_camera"):
+                self.bev_widget.set_dashboard_camera("bird" if self._mode == "bird" else "chase")
+        for group in (self._view_btns, self.settings_wheel.view_buttons):
+            for key, button in group.items():
+                button.setChecked(key == self._mode)
+
     def _toggle_settings(self):
         if self.settings_wheel.isVisible():
             self.settings_wheel.close_menu()
@@ -698,13 +511,19 @@ class HexCockpit(QWidget):
         else:
             self.settings_wheel.open_menu()
             self.gear.set_active(True)
+            self.settings_wheel.raise_()
 
     def _on_menu_choice(self, key):
         bev = self.bev_widget
+        if key in dict(VIEWS):
+            self.set_mode(key)
+            self.settings_wheel.close_menu()
+            self.gear.set_active(False)
+            return
         if key == "live":
-            self.set_view("live")
+            self.set_mode("live")
         elif key == "bev":
-            self.set_view("bev")
+            self.set_mode("adas")
         elif key == "night" and hasattr(bev, "set_env_mode"):
             bev.set_env_mode("night")
         elif key == "grid" and hasattr(bev, "toggle_cinematic_road"):
@@ -718,17 +537,12 @@ class HexCockpit(QWidget):
         self.set_interface_visible(self._full_view)
 
     def set_interface_visible(self, visible):
-        """Show the cockpit chrome or expand the active BEV/live view to the full display."""
         self._full_view = not bool(visible)
         self.settings_wheel.close_menu()
         self.gear.set_active(False)
         chrome = (
-            self.bezel,
-            self.hex_stroke,
-            self.gauge,
-            self.lbl_limit,
-            self.gear,
-            self.bottom,
+            self.gauge, self.lbl_limit, self.bottom, self.topbar,
+            self.status_card, self.lbl_fps,
         )
         if self._full_view:
             for widget in chrome:
@@ -742,67 +556,71 @@ class HexCockpit(QWidget):
         else:
             for widget in chrome:
                 widget.show()
-            viewport = _center_path(self.width(), self.height())
-            self.stack.setMask(QRegion(viewport.toFillPolygon().toPolygon()))
+            stage = _stage_rect(self.width(), self.height())
+            self.stack.setMask(QRegion(self._stage_path(stage).toFillPolygon().toPolygon()))
             if self.banner_fcw._active:
                 self.banner_fcw.show()
             if self.banner_ldw._active:
                 self.banner_ldw.show()
             self.btn_restore.hide()
-            self.bezel.raise_()
-            self.hex_stroke.raise_()
-            self.gauge.raise_()
-            self.lbl_limit.raise_()
-            self.gear.raise_()
-            self.banner_fcw.raise_()
-            self.banner_ldw.raise_()
-            self.bottom.raise_()
-        self.update()
+            self._raise_chrome()
 
-    def hex_polygon(self):
-        return self.bezel.hex_polygon()
+    def _stage_path(self, rect):
+        path = QPainterPath()
+        path.addRoundedRect(rect, 18, 18)
+        return path
+
+    def _raise_chrome(self):
+        for widget in (
+            self.gauge, self.lbl_limit, self.topbar, self.status_card, self.bottom,
+            self.banner_fcw, self.banner_ldw, self.settings_wheel,
+        ):
+            widget.raise_()
+
+    def _paint_status_dots(self, lane_ok, fcw_on, sign_ok, detect_ok):
+        states = (lane_ok, not fcw_on, sign_ok, detect_ok)
+        for dot, on in zip((self.dot_lane, self.dot_fcw, self.dot_sign, self.dot_obj), states):
+            color = "#3DDC97" if on else "#FF5A3C" if dot is self.dot_fcw and fcw_on else "#5C6B7A"
+            if dot is self.dot_fcw and fcw_on:
+                color = "#FF5A3C"
+            elif on:
+                color = "#3DDC97"
+            else:
+                color = "#5C6B7A"
+            dot.setStyleSheet(f"color:{color};font-size:14px;background:transparent;")
 
     def resizeEvent(self, event):
         w, h = self.width(), self.height()
         self.stack.setGeometry(self.rect())
-        viewport = _center_path(w, h)
+        stage = _stage_rect(w, h)
         if self._full_view:
             self.stack.clearMask()
         else:
-            self.stack.setMask(QRegion(viewport.toFillPolygon().toPolygon()))
-        self.bezel.setGeometry(self.rect())
-        self.hex_stroke.setGeometry(self.rect())
-        self.settings_wheel.setGeometry(self.rect())
-        self.bezel.raise_()
-        self._hex_pts = list(viewport.toFillPolygon())
-        self.hex_stroke.set_points(self._hex_pts)
-        self.settings_wheel.set_hex(viewport)
+            self.stack.setMask(QRegion(self._stage_path(stage).toFillPolygon().toPolygon()))
 
-        lx, ly = int(w * 0.145), int(h * 0.40)
-        self.gauge.move(lx - self.gauge.width() // 2, ly - self.gauge.height() // 2)
-        self.lbl_limit.move(lx - self.lbl_limit.width() // 2, int(h * 0.66))
+        self.topbar.setGeometry(int(w * 0.28), 10, int(w * 0.44), 30)
+        self.gauge.move(2, int(h * 0.13))
+        self.lbl_limit.move(
+            int(self.gauge.x() + (self.gauge.width() - self.lbl_limit.width()) / 2),
+            int(self.gauge.geometry().bottom() + 4),
+        )
 
-        rx = int(w * 0.865)
-        self.banner_fcw.move(rx - self.banner_fcw.width() // 2, int(h * 0.29))
-        self.banner_ldw.move(rx - self.banner_ldw.width() // 2, int(h * 0.54))
-
-        self.bottom.setGeometry(int(w * 0.245), int(h * 0.842), int(w * 0.51), 62)
-        self.btn_restore.move(w - self.btn_restore.width() - 18, 18)
-        self.hex_stroke.raise_()
-        self.settings_wheel.raise_()
-        self.gauge.raise_()
-        self.lbl_limit.raise_()
-        self.gear.raise_()
-        self.banner_fcw.raise_()
-        self.banner_ldw.raise_()
-        self.bottom.raise_()
-        if self._full_view:
+        panel_x = int(w * 0.785)
+        self.status_card.setGeometry(panel_x, 52, w - panel_x - 18, 280)
+        self.banner_fcw.move(panel_x, 344)
+        self.banner_ldw.move(panel_x, 386)
+        self.bottom.setGeometry(24, int(h * 0.855), w - 48, 64)
+        self.settings_wheel.setGeometry(int(w * 0.515), int(h * 0.42), int(w * 0.465), 300)
+        self.btn_restore.move(w - 110, 16)
+        if not self._full_view:
+            self._raise_chrome()
+        else:
             self.stack.raise_()
             self.btn_restore.raise_()
         super().resizeEvent(event)
 
     def update_hud(self, *, speed_mps=None, cipo_obj=None, cipo_status="SAFE",
-                   alerts=None, fps=None, lane_ok=False):
+                   alerts=None, fps=None, lane_ok=False, objects=None):
         alerts = alerts or {}
         kmh = None if speed_mps is None else float(speed_mps) * 3.6
         self.gauge.set_kmh(kmh)
@@ -811,18 +629,7 @@ class HexCockpit(QWidget):
         posted = isa.get("posted_mph")
         cand = isa.get("candidate_mph")
         live_limit = posted if posted is not None else cand
-        if live_limit is not None:
-            n = int(round(float(live_limit)))
-            _set_text(
-                self.lbl_limit,
-                f"SPEED LIMIT<br><span style='font-size:25px;font-weight:800;color:#F4FAFF'>{n}</span>",
-            )
-        else:
-            n = None
-            _set_text(
-                self.lbl_limit,
-                "SPEED LIMIT<br><span style='font-size:25px;font-weight:800;color:#F4FAFF'>—</span>",
-            )
+        self.lbl_limit.set_limit(live_limit)
 
         dist = None
         if cipo_obj is not None:
@@ -836,13 +643,9 @@ class HexCockpit(QWidget):
         ttc = alerts.get("ttc")
         if fcw_on:
             if fcw == "FCW+":
-                body = "BRAKE"
-                if ttc is not None:
-                    body = f"TTC {float(ttc):.1f}s"
-            elif far_key is not None:
-                body = f"LEAD {far_key} m"
+                body = f"TTC {float(ttc):.1f}s" if ttc is not None else "BRAKE"
             else:
-                body = "FORWARD"
+                body = f"LEAD {far_key} m" if far_key is not None else "FORWARD"
             self.banner_fcw.set_trigger(True, "FCW", body)
         else:
             self.banner_fcw.set_trigger(False)
@@ -851,8 +654,8 @@ class HexCockpit(QWidget):
         side = str(alerts.get("ldw_side") or "")
         ldw_on = ldw in ("LEFT", "RIGHT") or side in ("LEFT", "RIGHT")
         if ldw_on:
-            side_txt = side if side in ("LEFT", "RIGHT") else (ldw if ldw in ("LEFT", "RIGHT") else "")
-            self.banner_ldw.set_trigger(True, "LDW", side_txt or "DEPARTURE")
+            side_txt = side if side in ("LEFT", "RIGHT") else ldw
+            self.banner_ldw.set_trigger(True, "LDW", side_txt)
         else:
             self.banner_ldw.set_trigger(False)
 
@@ -860,16 +663,15 @@ class HexCockpit(QWidget):
             self.banner_fcw.hide()
             self.banner_ldw.hide()
 
-        minute = datetime.now().strftime("%H:%M")
+        now = datetime.now()
+        minute = now.strftime("%I:%M %p").lstrip("0")
         if minute != self._minute:
             self._minute = minute
-            _set_text(self.lbl_time, f"◷  {minute}")
+            _set_text(self.lbl_clock, minute)
+            _set_text(self.lbl_date, now.strftime("%a, %b %d"))
         if fps is not None:
             fps_i = int(round(fps))
-            if self._hud.get("fps") != fps_i:
-                self._hud["fps"] = fps_i
+            if fps_i != self._fps:
+                self._fps = fps_i
                 _set_text(self.lbl_fps, f"FPS {fps_i}")
-        elif self._hud.get("fps") is not None:
-            self._hud["fps"] = None
-            _set_text(self.lbl_fps, "FPS —")
-        _set_text(self.lbl_lane, "♙  LANE LOCK" if lane_ok else "♙  LANE …")
+        self._paint_status_dots(bool(lane_ok), fcw_on, live_limit is not None, True)
