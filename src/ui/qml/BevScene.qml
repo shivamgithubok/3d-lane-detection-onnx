@@ -343,24 +343,38 @@ Item {
         return Math.max(6, Math.min(height * 0.36, y))
     }
 
-    // Cluster void — no sky/sun/buildings. Matches the OEM dashboards.
+    // Scenic automotive horizon. Kept lightweight: gradients and vector silhouettes.
     Rectangle {
         id: skyBackdrop
         anchors.fill: parent
         z: 0
         gradient: Gradient {
-            GradientStop { position: 0.0; color: "#070b12" }
-            GradientStop { position: 0.42; color: "#0c141e" }
-            GradientStop { position: 1.0; color: "#101820" }
+            GradientStop { position: 0.0; color: root.scenicView ? root.skyTopColor : "#070b12" }
+            GradientStop { position: 0.42; color: root.scenicView ? root.skyMidColor : "#0c141e" }
+            GradientStop { position: 1.0; color: root.scenicView ? root.skyBotColor : "#101820" }
         }
     }
 
     Item {
         id: sunGlow
         z: 1
-        visible: false
-        width: 1
-        height: 1
+        visible: root.scenicView
+        x: root.sunScreenX
+        y: root.sunScreenY
+        width: root.sunDiscSize * 2.6
+        height: width
+        Rectangle {
+            anchors.fill: parent
+            radius: width / 2
+            color: Qt.rgba(root.sunColor.r, root.sunColor.g, root.sunColor.b, 0.13)
+        }
+        Rectangle {
+            anchors.centerIn: parent
+            width: parent.width * 0.38
+            height: width
+            radius: width / 2
+            color: root.sunColor
+        }
     }
 
     // Distant mountain ranges along the horizon (replaces the fake mist slab).
@@ -371,8 +385,8 @@ Item {
         z: 1
         y: parent.height * 0.26
         height: parent.height * 0.22
-        opacity: 0.0
-        visible: false
+        opacity: root.scenicView ? 0.72 : 0.0
+        visible: root.scenicView
 
         // Far range — lighter, softer, sits behind near peaks
         Shape {
@@ -700,7 +714,7 @@ Item {
                 position: Qt.vector3d(0, -0.04, -40)
                 materials: PrincipledMaterial {
                     lighting: PrincipledMaterial.NoLighting
-                    baseColor: "#0a1018"
+                    baseColor: root.shoulderCol
                     roughness: 1.0
                 }
             }
@@ -711,7 +725,7 @@ Item {
                 scale: Qt.vector3d(0.12, 0.90, 1)
                 position: Qt.vector3d(0, 0, -40)
                 materials: PrincipledMaterial {
-                    baseColor: "#1a2433"
+                    baseColor: root.asphaltCol
                     roughness: 0.97
                     metalness: 0.0
                 }
