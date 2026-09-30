@@ -396,6 +396,7 @@ class InferenceWorker(QThread):
                             self.isa.snapshot(),
                             ego_mph=ego_mph,
                             detections=self._last_sign_dets,
+                            badges=False,
                         )
                     annotated_frame = draw_adas_alerts(
                         annotated_frame,

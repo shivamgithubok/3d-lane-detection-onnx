@@ -385,8 +385,8 @@ Item {
         z: 1
         y: parent.height * 0.26
         height: parent.height * 0.22
-        opacity: root.scenicView ? 0.72 : 0.0
-        visible: root.scenicView
+        opacity: 0.0
+        visible: false
 
         // Far range — lighter, softer, sits behind near peaks
         Shape {

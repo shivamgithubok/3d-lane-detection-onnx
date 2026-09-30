@@ -154,9 +154,11 @@ def filter_sign_dets(detections, frame_shape, hud_frac=0.10, min_h_frac=0.028):
     return kept
 
 
-def draw_isa_overlay(frame_bgr, isa, ego_mph=None, detections=None):
-    """Boxes + LIMIT badge + ego HUD speed."""
+def draw_isa_overlay(frame_bgr, isa, ego_mph=None, detections=None, badges=True):
+    """Sign boxes, plus optional LIMIT / ego speed badges."""
     out = draw_detections(frame_bgr, detections or [])
+    if not badges:
+        return out
     h, w = out.shape[:2]
     posted = isa.get("posted_mph") if isa else None
     status = (isa or {}).get("status", "NONE")
