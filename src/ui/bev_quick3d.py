@@ -69,7 +69,7 @@ SAME_LANE_GAP_M = 8.0         # min range gap for two cars in the same lane
 POLY_SAMPLES = 48
 CORRIDOR_SEGS = 16
 BOUNDARY_SEGS = 12
-CORRIDOR_START_M = 5.0   # start ahead of the ego body, not under the car
+CORRIDOR_START_M = 5.0   # same near anchor as the lane lines, ahead of the ego body
 CORRIDOR_DRAW_M = 30.0   # practical cluster lookahead
 
 # Lane-slot presence hysteresis: how a neighbouring marking fades in/out.
@@ -148,6 +148,7 @@ class BevQuick3DWidget(QQuickWidget):
         self._last_corridor_json = None
         self._last_lane_json = None
         self._last_dash_json = None
+        self._last_center_json = None
         self._last_edge_json = None
         self._traffic_seed = []
         self._traffic_t0 = 0.0
@@ -436,9 +437,22 @@ class BevQuick3DWidget(QQuickWidget):
             return []
         ys = np.linspace(CORRIDOR_START_M, CORRIDOR_DRAW_M, POLY_SAMPLES)
         xs = self.lane_frame.lane_x(ys)
-        w = float(np.clip(self.lane_frame.lane_width * 0.94, 2.6, 3.6))
+        # Inside the ego lane, not edge to edge. 0.52 leaves a wider gap
+        # before each lane line.
+        width = float(np.clip(self.lane_frame.lane_width * 0.52, 1.4, 2.1))
         rows = self._poly_segments(
-            ys, xs, w, max_segs=CORRIDOR_SEGS, y_min=CORRIDOR_START_M,
+            ys, xs, width, max_segs=CORRIDOR_SEGS, y_min=CORRIDOR_START_M,
+        )
+        return rows[:18]
+
+    def _center_payload(self):
+        """Lane centerline, thinner than the corridor and on the same path."""
+        if not self.lane_frame.valid:
+            return []
+        ys = np.linspace(CORRIDOR_START_M, CORRIDOR_DRAW_M, POLY_SAMPLES)
+        xs = self.lane_frame.lane_x(ys)
+        rows = self._poly_segments(
+            ys, xs, 0.08, max_segs=CORRIDOR_SEGS, y_min=CORRIDOR_START_M,
         )
         return rows[:18]
 
@@ -765,6 +779,10 @@ class BevQuick3DWidget(QQuickWidget):
         if dashes != self._last_dash_json:
             self._last_dash_json = dashes
             self._set("dashJson", dashes)
+        center = json.dumps(self._center_payload(), separators=(",", ":"))
+        if center != self._last_center_json:
+            self._last_center_json = center
+            self._set("centerJson", center)
         edges = json.dumps(self._edge_payload(slots, offsets), separators=(",", ":"))
         if edges != self._last_edge_json:
             self._last_edge_json = edges

@@ -66,7 +66,9 @@ Item {
                                      : (cipoStatus === "WARNING" ? "#e09a20" : "#3ec8ff")
     readonly property color corridorColor: cipoStatus === "DANGER" ? Qt.rgba(0.95, 0.18, 0.32, 0.72)
                                      : (cipoStatus === "WARNING" ? Qt.rgba(1.0, 0.72, 0.08, 0.70)
-                                                                 : Qt.rgba(0.24, 0.78, 1.0, 0.55))
+                                                                 : Qt.rgba(0.24, 0.86, 0.52, 0.92))
+    readonly property color laneColor: "#F4F7FB"
+    readonly property color centerColor: "#D8FFE8"
     property string overlayHint: "Phase 2 — loading GLB"
     property url egoGltf: ""
     property url skodaGltf: ""
@@ -109,6 +111,7 @@ Item {
     property string corridorJson: "[]"
     property string laneJson: "[]"
     property string dashJson: "[]"
+    property string centerJson: "[]"
     property string edgeJson: "[]"
     property string trailJson: "[]"
 
@@ -120,6 +123,7 @@ Item {
     onCorridorJsonChanged: applySegPool(corrRep, root.corridorJson, 0.045)
     onLaneJsonChanged: applyLanes()
     onDashJsonChanged: applyDashes()
+    onCenterJsonChanged: applyCenter()
     onEdgeJsonChanged: applyEdges()
     onTrailJsonChanged: applyTrail()
     onShowLaneLinesChanged: { applyLanes(); applyDashes(); applyEdges(); applyTrail() }
@@ -133,6 +137,7 @@ Item {
         applySegPool(corrRep, root.corridorJson, 0.045)
         applyLanes()
         applyDashes()
+        applyCenter()
         applyEdges()
         applyTrail()
     }
@@ -482,6 +487,11 @@ Item {
         applySegPool(dashRep, src, 0.03)
     }
 
+    function applyCenter() {
+        const src = root.centerJson ? root.centerJson : "[]"
+        applySegPool(centerRep, src, 0.07)
+    }
+
     function applyEdges() {
         // Road edges come only from stable, hysteretic lane slots. There is no
         // static ±5.35 fallback: it used to pop in on every detection miss and
@@ -781,7 +791,7 @@ Item {
                 source: "#Cube"
                 materials: PrincipledMaterial {
                     lighting: PrincipledMaterial.NoLighting
-                    baseColor: "#c5d0dc"
+                    baseColor: root.laneColor
                 }
             }
         }
@@ -835,6 +845,18 @@ Item {
             }
         }
 
+        Repeater3D {
+            id: centerRep
+            model: 18
+            Model {
+                visible: false
+                source: "#Cube"
+                materials: PrincipledMaterial {
+                    lighting: PrincipledMaterial.NoLighting
+                    baseColor: root.centerColor
+                }
+            }
+        }
         Repeater3D {
             id: corrRep
             model: 18

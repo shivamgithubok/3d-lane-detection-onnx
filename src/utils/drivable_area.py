@@ -888,11 +888,16 @@ def get_ego_corridor_sides_2d(
     Lu = np.interp(vs, L[:, 1], L[:, 0])
     Ru = np.interp(vs, R[:, 1], R[:, 0])
 
-    inset_frac_l = 0.0 if use_smoothed_corridor else float(left_margin) / float(STANDARD_LANE_WIDTH)
-    inset_frac_r = 0.0 if use_smoothed_corridor else float(right_margin) / float(STANDARD_LANE_WIDTH)
+    inset_each_side = 0.24  # 52% of the left-to-right lane, centered
+    if not use_smoothed_corridor:
+        inset_each_side = max(
+            inset_each_side,
+            float(left_margin) / float(STANDARD_LANE_WIDTH),
+            float(right_margin) / float(STANDARD_LANE_WIDTH),
+        )
     width = np.maximum(Ru - Lu, 1.0)
-    Lu_i = Lu + inset_frac_l * width
-    Ru_i = Ru - inset_frac_r * width
+    Lu_i = Lu + inset_each_side * width
+    Ru_i = Ru - inset_each_side * width
 
     def map_to_target(us, vs_):
         model_pts = np.column_stack((us, vs_))

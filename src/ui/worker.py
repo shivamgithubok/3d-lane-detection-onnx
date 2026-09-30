@@ -28,6 +28,30 @@ from src.utils.split_visualization import draw_front_view_cipo
 from src.utils.camera_transform import CameraTransform
 from src.tracking.road_state import RoadStateEstimator
 from src.utils.ego_speed import EgoSpeedLog
+_LIVE_TRT_RUNTIMES = []
+
+
+def _retain_tensorrt_runtimes():
+    """Keep every TensorRT runtime alive for the process.
+
+    ``with trt.Runtime()`` destroys the runtime on exit. On this Jetson the
+    next ``createInferRuntime`` then blocks forever, so the video loop never
+    starts. Ultralytics and LPRNet both use that pattern.
+    """
+    import tensorrt as trt
+
+    runtime_cls = trt.Runtime
+    if getattr(runtime_cls, "_adas_retain", False):
+        return
+
+    def _exit(self, exc_type, exc, tb):
+        _LIVE_TRT_RUNTIMES.append(self)
+        return False
+
+    runtime_cls.__exit__ = _exit
+    runtime_cls._adas_retain = True
+
+
 from src.utils.calibration import (
     make_P_matrix,
     preset_for_video,
@@ -35,10 +59,16 @@ from src.utils.calibration import (
     OPENLANE_CAM_HEIGHT,
 )
 from src.utils.ground_calib import GroundCalibration
+from src.utils.openlane_view import OpenLaneView
 
 INPUT_H, INPUT_W = 360, 480
 
-def preprocess_frame(frame):
+def preprocess_frame(frame, lane_view=None):
+    """Lane input. `lane_view` is the OpenLane road warp; otherwise sky-crop."""
+    if lane_view is not None:
+        resized = lane_view.apply(frame)
+        img, mask, meta = prepare_lane_input(resized)
+        return img, mask, resized, lane_view, meta
     frame_transform = CameraTransform.for_frame(frame, (INPUT_W, INPUT_H))
     resized = frame_transform.apply(frame)
     img, mask, meta = prepare_lane_input(resized)
@@ -79,6 +109,7 @@ class InferenceWorker(QThread):
         self.ground_calib = self._calib_base
         self._ui_pitch = None
         self._ui_height = None
+        self._lane_view = None
 
     def set_calibration(self, pitch_deg, height_m):
         """OpenLane P stays locked. Use set_object_calib for ranging sliders."""
@@ -123,6 +154,7 @@ class InferenceWorker(QThread):
                 import tensorrt as trt
                 import pycuda.driver as cuda
 
+                _retain_tensorrt_runtimes()
                 cuda.init()
                 dev = cuda.Device(0)
                 cuda_ctx = dev.make_context()
@@ -157,13 +189,17 @@ class InferenceWorker(QThread):
                 trt_context.set_tensor_address("reg_proposals", int(d_reg_proposals))
                 trt_context.set_tensor_address("anchors", int(d_anchors))
 
-                # 2. YOLO nano + ByteTrack (pop pycuda so Ultralytics/TensorRT can load)
+                # 2. YOLO nano + signs + LPR. The lane pycuda context must be
+                # popped first; a second TensorRT runtime deadlocks if it is current.
                 detector = None
+                self.lpr = None
+                self._isa_use_class = True
                 try:
                     cuda_ctx.pop()
                 except Exception:
                     pass
                 try:
+                    print("[ADAS] Loading vehicle detector...", flush=True)
                     yolo_path = self.yolo_engine_path
                     if not os.path.isfile(yolo_path):
                         yolo_path = "models/yolov8n.pt"
@@ -171,16 +207,19 @@ class InferenceWorker(QThread):
                         model_path=yolo_path, conf_thresh=0.22, imgsz=640
                     )
                     detector = self.detector
+                    print("[ADAS] Loading traffic-sign detector...", flush=True)
                     sign_path = resolve_model_path(self.sign_engine_path)
                     if sign_path:
                         self.sign_detector = TrafficSignDetector(
                             model_path=sign_path, conf_thresh=0.35
                         )
                         self.status_message.emit(f"Traffic-sign engine: {sign_path}")
+                        print(f"[ADAS] Traffic-sign engine ready: {sign_path}", flush=True)
                     else:
                         self.sign_detector = None
                 except Exception as ye:
                     self.status_message.emit(f"YOLO init warning: {ye}")
+                    print(f"[ADAS] Detector init warning: {ye}", flush=True)
                     self.detector = None
                     detector = None
                 finally:
@@ -189,20 +228,20 @@ class InferenceWorker(QThread):
                     except Exception:
                         pass
 
-                # 2b. LPRNet on the lane pycuda context (YOLO only gave the box)
-                self.lpr = None
-                self._isa_use_class = True
                 lpr_path = self.lpr_engine_path
                 if not os.path.isfile(lpr_path):
                     lpr_path = lpr_paths()["engine"]
                 if os.path.isfile(lpr_path):
+                    print("[ADAS] Loading speed-limit reader...", flush=True)
                     try:
                         self.lpr = LPRNetRecognizer(engine_path=lpr_path)
                         self._isa_use_class = False
                         self.status_message.emit(f"LPRNet engine: {lpr_path}")
+                        print(f"[ADAS] LPRNet ready: {lpr_path}", flush=True)
                     except Exception as le:
                         self.lpr = None
                         self.status_message.emit(f"LPRNet init warning: {le}")
+                        print(f"[ADAS] LPRNet skipped: {le}", flush=True)
 
                 # 3. CIPO tracker: OpenLane P for lanes, measured calib for objects
                 tracker = CIPOTracker(
@@ -219,6 +258,7 @@ class InferenceWorker(QThread):
                 )
 
                 use_trt = True
+                print("[ADAS] Engines ready, starting video inference", flush=True)
                 self.status_message.emit("Engines ready: lanes + YOLO (ground-plane range)")
             except Exception as e:
                 self.status_message.emit(f"TensorRT Init Warning: {e}")
@@ -226,7 +266,14 @@ class InferenceWorker(QThread):
         cap = None
         if self.video_path and os.path.exists(self.video_path):
             cap = cv2.VideoCapture(self.video_path)
+            opened = bool(cap is not None and cap.isOpened())
+            print(
+                f"[ADAS] Video {'opened' if opened else 'FAILED to open'}: {self.video_path}",
+                flush=True,
+            )
             self.status_message.emit(f"Playing Video: {os.path.basename(self.video_path)}")
+        elif self.video_path:
+            print(f"[ADAS] Video file not found: {self.video_path}", flush=True)
 
         fps_history = []
         frame_i = 0
@@ -260,6 +307,7 @@ class InferenceWorker(QThread):
                 cipo_status = "SAFE"
                 ego_left, ego_right = None, None
                 left_3d, right_3d = None, None
+                road_state = None
                 speed_mps = None
                 alerts_snap = {
                     "ldw": "OFF",
@@ -270,8 +318,23 @@ class InferenceWorker(QThread):
                 }
 
                 if frame is not None and use_trt:
+                    if frame_i == 0:
+                        print("[ADAS] Frame 0: running lane inference...", flush=True)
                     # Step A: 3D Lane TensorRT Inference
-                    img_tensor, mask_tensor, _, frame_transform, prep_meta = preprocess_frame(frame)
+                    if self._lane_view is None:
+                        fh, fw = frame.shape[:2]
+                        base = self._calib_base or self.ground_calib
+                        lane_calib = base.adapted_to(fw, fh) if base is not None else None
+                        if lane_calib is not None:
+                            self._lane_view = OpenLaneView(lane_calib, self.P_matrix)
+                            print(
+                                f"[ADAS] Lane view: OpenLane road warp "
+                                f"({lane_calib.source})",
+                                flush=True,
+                            )
+                    img_tensor, mask_tensor, _, frame_transform, prep_meta = preprocess_frame(
+                        frame, self._lane_view
+                    )
                     cuda.memcpy_htod_async(d_img, img_tensor, stream)
                     cuda.memcpy_htod_async(d_mask, mask_tensor, stream)
 
@@ -280,6 +343,8 @@ class InferenceWorker(QThread):
                     cuda.memcpy_dtoh_async(h_reg_proposals, d_reg_proposals, stream)
                     cuda.memcpy_dtoh_async(h_anchors, d_anchors, stream)
                     stream.synchronize()
+                    if frame_i == 0:
+                        print("[ADAS] Frame 0: lane inference returned", flush=True)
 
                     raw_proposals, scores = postprocess_onnx_output(
                         h_reg_proposals, conf_threshold=prep_meta["conf"]
@@ -356,10 +421,11 @@ class InferenceWorker(QThread):
                         )
                         cipo_status = tracker.last_cipo_status
 
+                road_status = road_state.status if road_state is not None else "UNKNOWN"
                 alerts_snap = self.alerts.update(
                     ego_left,
                     ego_right,
-                    road_state.status,
+                    road_status,
                     cipo_obj,
                     cipo_status,
                     speed_mps,
@@ -386,6 +452,7 @@ class InferenceWorker(QThread):
                         road_state_valid=(left_3d is not None and right_3d is not None),
                         left_corridor_3d=left_3d,
                         right_corridor_3d=right_3d,
+                        ground_calib=self.ground_calib,
                     )
                     if self.sign_detector is not None:
                         ego_mph = None

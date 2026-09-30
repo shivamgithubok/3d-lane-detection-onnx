@@ -205,9 +205,12 @@ class LPRNetRecognizer:
             cuda.init()
         except Exception:
             pass
+        current = None
         try:
-            cuda.Context.get_current()
+            current = cuda.Context.get_current()
         except Exception:
+            current = None
+        if current is None:
             self._own_ctx = cuda.Device(0).make_context()
 
         logger = trt.Logger(trt.Logger.WARNING)

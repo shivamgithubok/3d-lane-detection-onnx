@@ -7,6 +7,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '.
 from src.utils.visualization import draw_bev, world_to_canvas
 from src.inference.postprocess import ANCHOR_Y_STEPS, decode_lane_pixels
 from src.utils.drivable_area import extract_ego_corridor_3d, get_ego_corridor_2d_pixels, get_ego_corridor_sides_2d, fill_missing_lane_gaps, find_ego_lanes, parse_lane_components, parse_lane_components, STANDARD_LANE_WIDTH
+from src.utils.paint_snap import lane_paint_mask, snap_hit_fraction, snap_polyline_to_paint
 from src.utils.draw_3d_box import draw_3d_wireframe_box
 
 
@@ -166,6 +167,75 @@ def _draw_lane_line(img, pts, color, thickness):
     cv2.polylines(img, [arr], False, color, thickness, cv2.LINE_AA)
 
 
+def _project_lane_draw_points(lane, P_matrix, frame_transform, w_img, h_img, scale_x, scale_y):
+    """Ego/adjacent lane pixels in the source frame, same filter as the green lines."""
+    if lane is None:
+        return []
+    pts = decode_lane_pixels(lane, P_matrix, flat_ground=False)
+    model_pts = np.asarray(
+        [(u, v) for u, v in pts if 0 <= u < 480 and 0 <= v < 360],
+        dtype=np.float64,
+    )
+    if len(model_pts) == 0:
+        return []
+    if frame_transform is not None:
+        target_pts = np.asarray(frame_transform.model_to_source(model_pts), dtype=np.float64)
+    else:
+        target_pts = model_pts.copy()
+        target_pts[:, 0] *= scale_x
+        target_pts[:, 1] *= scale_y
+    return [
+        (int(round(u)), int(round(v)))
+        for u, v in target_pts
+        if 0 <= u < w_img and 0 <= v < h_img
+    ]
+
+
+def _inset_polylines(left, right, frac):
+    """Pull a left/right pair inward so the fill sits inside the paint."""
+    L = np.asarray(left, dtype=np.float64)
+    R = np.asarray(right, dtype=np.float64)
+    if len(L) < 2 or len(R) < 2:
+        return None
+    L = L[np.argsort(L[:, 1])]
+    R = R[np.argsort(R[:, 1])]
+    v0 = max(float(L[0, 1]), float(R[0, 1]))
+    v1 = min(float(L[-1, 1]), float(R[-1, 1]))
+    if v1 - v0 < 8:
+        return None
+    vs = np.linspace(v0, v1, 16)
+    lu = np.interp(vs, L[:, 1], L[:, 0])
+    ru = np.interp(vs, R[:, 1], R[:, 0])
+    width = ru - lu
+    if np.median(width) < 12:
+        return None
+    lu = lu + float(frac) * width
+    ru = ru - float(frac) * width
+    left_pts = [(int(round(u)), int(round(v))) for u, v in zip(lu, vs)]
+    right_pts = [(int(round(u)), int(round(v))) for u, v in zip(ru, vs)]
+    return left_pts, right_pts
+
+
+def _clip_side_to_near_row(pts, v_max):
+    """Cut a far-to-near polyline so it does not pass the ego-lane near row."""
+    if v_max is None or len(pts) < 2:
+        return list(pts)
+    out = []
+    for u, v in pts:
+        if v <= v_max:
+            out.append((int(u), int(v)))
+            continue
+        if out:
+            pu, pv = out[-1]
+            span = float(v) - float(pv)
+            if abs(span) > 1e-3:
+                t = (float(v_max) - float(pv)) / span
+                t = max(0.0, min(1.0, t))
+                out.append((int(round(pu + t * (float(u) - pu))), int(round(v_max))))
+        break
+    return out
+
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -182,6 +252,7 @@ def draw_front_view_cipo(
     road_state_valid=True,
     left_corridor_3d=None,
     right_corridor_3d=None,
+    ground_calib=None,
 ):
     """
     Renders front camera view with ultra-fast single-pass overlay blending:
@@ -207,6 +278,15 @@ def draw_front_view_cipo(
     danger           = min_dist_in_path < 15.0
     warning          = 15.0 <= min_dist_in_path < 30.0
 
+    paint = lane_paint_mask(frame, ground_calib)
+
+    def _snap_draw(pts):
+        if len(pts) < 2:
+            return pts
+        if snap_hit_fraction(pts, frame, ground_calib, mask=paint) < 0.30:
+            return pts
+        return snap_polyline_to_paint(pts, frame, ground_calib, mask=paint)
+
     # ── 1. Drivable area corridor fill (on overlay) ──────────────────────
     if show_drivable and road_state_valid and proposals is not None:
         sides = get_ego_corridor_sides_2d(
@@ -217,6 +297,39 @@ def draw_front_view_cipo(
             left_corridor_3d=left_corridor_3d,
             right_corridor_3d=right_corridor_3d,
         )
+        if sides is not None:
+            # Near edge matches the green ego lines (the hood-side tips), so the
+            # fill does not continue down onto the bonnet past those tips.
+            near_rows = []
+            for lane in (ego_left, ego_right):
+                tips = _project_lane_draw_points(
+                    lane, P_matrix, frame_transform, w_img, h_img, scale_x, scale_y
+                )
+                if tips:
+                    near_rows.append(max(v for _, v in tips))
+            if near_rows:
+                near_v = max(near_rows)
+                left_c = _clip_side_to_near_row(sides[0], near_v)
+                right_c = _clip_side_to_near_row(sides[1], near_v)
+                sides = (left_c, right_c) if len(left_c) >= 2 and len(right_c) >= 2 else None
+        # Prefer the ego paint itself for the fill, so the band sits in the
+        # painted lane instead of the OpenLane corridor.
+        ego_snapped = []
+        for lane in (ego_left, ego_right):
+            raw = _project_lane_draw_points(
+                lane, P_matrix, frame_transform, w_img, h_img, scale_x, scale_y
+            )
+            snapped = _snap_draw(raw)
+            ego_snapped.append(snapped if len(snapped) >= 2 else None)
+        if ego_snapped[0] is not None and ego_snapped[1] is not None:
+            inset = _inset_polylines(ego_snapped[0], ego_snapped[1], 0.10)
+            if inset is not None:
+                sides = inset
+        elif sides is not None:
+            left_s = _snap_draw(sides[0])
+            right_s = _snap_draw(sides[1])
+            if len(left_s) >= 2 and len(right_s) >= 2:
+                sides = (left_s, right_s)
         if sides is not None:
             _fill_corridor_gradient(overlay, sides[0], sides[1], danger=danger, warning=warning)
 
@@ -261,27 +374,19 @@ def draw_front_view_cipo(
                 (ego_l_idx is not None and idx == ego_l_idx - 1)
                 or (ego_r_idx is not None and idx == ego_r_idx + 1)
             )
-            # Corridor fill already shows the ego path — hide those polylines
-            # only while a corridor is actually on screen. If occupancy drops
-            # the fill, keep detected paint visible so lanes do not vanish.
-            if is_ego and road_state_valid:
-                continue
+            # Ego lane lines stay visible in green beside the inset corridor.
             if not is_ego and not is_adj and not no_ego_lock:
                 continue
-            lane_color, thickness = (60, 150, 210), 1
-
-            # flat_ground=False → keep calibrated height (do not zero Z)
-            pts = decode_lane_pixels(lane, P_matrix, flat_ground=False)
-            model_pts = np.asarray([(u, v) for u, v in pts if 0 <= u < 480 and 0 <= v < 360])
-            if frame_transform is not None and len(model_pts) > 0:
-                target_pts = frame_transform.model_to_source(model_pts)
-                draw_pts = [
-                    (int(round(u)), int(round(v)))
-                    for u, v in target_pts
-                    if 0 <= u < w_img and 0 <= v < h_img
-                ]
+            if is_ego:
+                lane_color, thickness = (0, 255, 0), 3
             else:
-                draw_pts = [(int(u * scale_x), int(v * scale_y)) for u, v in model_pts]
+                lane_color, thickness = (0, 255, 0), 2
+
+            draw_pts = _snap_draw(
+                _project_lane_draw_points(
+                    lane, P_matrix, frame_transform, w_img, h_img, scale_x, scale_y
+                )
+            )
             if len(draw_pts) > 1:
                 _draw_lane_line(annotated, draw_pts, lane_color, thickness)
 

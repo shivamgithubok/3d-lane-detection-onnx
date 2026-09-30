@@ -53,9 +53,10 @@ CORRIDOR_WIDTH_CLAMP_M = 3.7   # width used when clamping an oversized pair
 # Always draw the fill at this paint-to-paint width (then inset by margin),
 # including EKF / onesided PREDICTED fallback — stops the corridor from ballooning.
 CORRIDOR_FORCE_FIXED_WIDTH = True
-# Front fill starts past the ego hood (image bottom). Same idea as YOLO_BOTTOM_DROP_FRAC.
-CORRIDOR_IMAGE_HOOD_FRAC = 0.24
-CORRIDOR_Y_START_M = 6.5       # also skip 3D samples closer than this (hood / bumper)
+# Front fill starts just above the hood. Lane polylines begin at the 5 m anchor,
+# so the corridor uses that same near point instead of starting farther up the road.
+CORRIDOR_IMAGE_HOOD_FRAC = 0.06
+CORRIDOR_Y_START_M = 5.0
 EGO_PAIR_HOLD_FRAMES = LANE_HOLD_FRAMES
 EGO_PAIR_MATCH_X_M = 1.25      # rematch held lanes to new proposals by |Δmean_x|
 # Camera X is the optical axis, not the vehicle centerline. Subtract this
