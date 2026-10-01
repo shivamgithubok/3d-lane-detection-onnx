@@ -48,7 +48,204 @@ def lane_paint_mask(frame: np.ndarray, calib=None) -> np.ndarray:
     return mask
 
 
-def snap_polyline_to_paint(pts, frame, calib=None, mask=None, window_m=2.2):
+# Half-width of the paint search. After LANE_X_SCALE the projected line sits
+# on the stripe (~0.1 m), so 1.0 m reaches paint without the next lane
+# (~3.7 m). 2.2 m was required only while X was 1.24x too wide.
+SNAP_WINDOW_M = 1.0
+# After the line is on the paint, ignore a snap that leaps to another stripe.
+SHIFT_JUMP_M = 0.40
+SLOT_MATCH_M = 1.15
+# A move bigger than this is the car changing lanes, not the same stripe.
+LANE_MOVE_M = 1.50
+SLOT_CONFIRM_HITS = 2
+SLOT_HOLD = 6
+MAX_DRAW_SLOTS = 4
+DRAW_FREEZE_FRAMES = 12  # ~0.4 s; hold last strokes while the corridor is UNKNOWN
+DRAW_BLEND = 0.40        # weight of this frame's snap; rest is the previous stroke
+
+
+def _median_shift_m(raw, snapped, calib):
+    """Median lateral correction, matched on image row so dropped points do not skew it."""
+    if not raw or not snapped:
+        return 0.0
+    S = np.asarray(snapped, dtype=np.float64)
+    if S.ndim != 2 or len(S) < 2:
+        return 0.0
+    S = S[np.argsort(S[:, 1])]
+    shifts = []
+    for u, v in raw:
+        v = float(v)
+        if v < S[0, 1] or v > S[-1, 1]:
+            continue
+        us = float(np.interp(v, S[:, 1], S[:, 0]))
+        shifts.append(_px_to_m(calib, v, us - float(u)))
+    if not shifts:
+        return 0.0
+    return float(np.median(shifts))
+
+
+def _blend_polylines(prev, new, alpha):
+    """Lateral blend of two polylines matched on image row."""
+    if not prev or len(prev) < 2:
+        return [(float(u), float(v)) for u, v in new]
+    if not new or len(new) < 2:
+        return [(float(u), float(v)) for u, v in prev]
+    P = np.asarray(prev, dtype=np.float64)
+    N = np.asarray(new, dtype=np.float64)
+    P = P[np.argsort(P[:, 1])]
+    N = N[np.argsort(N[:, 1])]
+    v0 = max(float(P[0, 1]), float(N[0, 1]))
+    v1 = min(float(P[-1, 1]), float(N[-1, 1]))
+    if v1 - v0 < 8.0:
+        return [(float(u), float(v)) for u, v in new]
+    vs = np.linspace(v0, v1, max(len(N), 12))
+    pu = np.interp(vs, P[:, 1], P[:, 0])
+    nu = np.interp(vs, N[:, 1], N[:, 0])
+    a = float(np.clip(alpha, 0.0, 1.0))
+    u = (1.0 - a) * pu + a * nu
+    return list(zip(u.tolist(), vs.tolist()))
+
+
+class LaneDrawStabilizer:
+    """One persistent stroke per physical lane.
+
+    A new detection updates the matching stroke. It does not add another
+    polyline on top. The paint snap remembers its lateral shift and ignores a
+    jump onto a different stripe.
+    """
+
+    def __init__(self):
+        self._slots = []
+        self._freeze_age = 0
+
+    def reset(self):
+        self._slots = []
+        self._freeze_age = 0
+
+    def _match(self, x_m, role, used):
+        best_i = None
+        best_d = SLOT_MATCH_M
+        for i, slot in enumerate(self._slots):
+            if i in used:
+                continue
+            slot_role = slot.get("role")
+            if role in ("left", "right", "adj_l", "adj_r") and slot_role in (
+                "left", "right", "adj_l", "adj_r"
+            ):
+                if slot_role != role:
+                    continue
+            d = abs(float(slot["x"]) - float(x_m))
+            if d > LANE_MOVE_M:
+                continue
+            same = role and slot_role == role
+            if same:
+                d *= 0.5
+            if d < best_d:
+                best_d = d
+                best_i = i
+        return best_i
+
+    def _drawn_from_slots(self):
+        drawn = []
+        for slot in self._slots:
+            if slot["hits"] < SLOT_CONFIRM_HITS or slot["miss"] > SLOT_HOLD:
+                continue
+            if len(slot["pts"]) >= 2:
+                drawn.append({
+                    "pts": [(float(u), float(v)) for u, v in slot["pts"]],
+                    "role": slot["role"],
+                    "x": float(slot["x"]),
+                })
+        return drawn
+
+    def hold(self):
+        """Keep the last strokes on screen; do not match new detections."""
+        self._freeze_age += 1
+        if self._freeze_age > DRAW_FREEZE_FRAMES:
+            for slot in self._slots:
+                slot["miss"] = int(slot["miss"]) + 1
+            self._slots = [s for s in self._slots if s["miss"] <= SLOT_HOLD]
+            return []
+        return self._drawn_from_slots()
+
+    def _snap_locked(self, pts, slot, frame, calib, mask):
+        """Per-point snap onto the stripe. A locked line will not leap away.
+
+        The drawn geometry is the snap itself. A single sideways shift of the
+        raw line stays parallel to the wrong projection and misses the paint.
+        """
+        prev = 0.0 if slot is None else float(slot["shift_m"])
+        on_paint = bool(slot is not None and slot.get("on_paint"))
+        raw = [(float(u), float(v)) for u, v in pts]
+        if len(raw) < 2:
+            return raw, prev, on_paint
+        snapped = snap_polyline_to_paint(
+            pts, frame, calib, mask=mask, window_m=SNAP_WINDOW_M
+        )
+        snapped_f = [(float(u), float(v)) for u, v in snapped]
+        shift = _median_shift_m(raw, snapped_f, calib)
+        if on_paint and abs(shift - float(prev)) > SHIFT_JUMP_M:
+            held = [(float(u), float(v)) for u, v in slot["pts"]]
+            return held, prev, True
+        found = abs(shift) > 0.04 or on_paint
+        return snapped_f, shift, bool(found)
+
+    def update(self, items, frame, calib, mask):
+        """items: dicts with x (meters), pts (projected pixels), role.
+
+        Returns the strokes to draw, each ``{pts, role, x}``.
+        """
+        used = set()
+        order = sorted(range(len(items)), key=lambda i: abs(float(items[i]["x"])))
+        for i in order:
+            item = items[i]
+            slot_i = self._match(item["x"], item.get("role"), used)
+            slot = None if slot_i is None else self._slots[slot_i]
+            snapped, shift, on_paint = self._snap_locked(
+                item["pts"], slot, frame, calib, mask
+            )
+            if slot is None:
+                if len(self._slots) >= MAX_DRAW_SLOTS:
+                    continue
+                role = item.get("role") or "other"
+                for old in self._slots:
+                    if old.get("role") == role and abs(float(old["x"]) - float(item["x"])) > LANE_MOVE_M:
+                        old["miss"] = SLOT_HOLD + 1
+                self._slots.append({
+                    "x": float(item["x"]),
+                    "pts": snapped,
+                    "shift_m": float(shift),
+                    "hits": SLOT_CONFIRM_HITS,
+                    "miss": 0,
+                    "role": role,
+                    "on_paint": bool(on_paint),
+                })
+                used.add(len(self._slots) - 1)
+                continue
+            # Sit on this frame's snap, blended with the locked stroke so a
+            # dashed-gap miss does not yank the line sideways.
+            slot["pts"] = _blend_polylines(slot.get("pts"), snapped, DRAW_BLEND)
+            slot["shift_m"] = float(shift)
+            slot["on_paint"] = bool(on_paint or slot.get("on_paint"))
+            slot["x"] = 0.5 * float(slot["x"]) + 0.5 * float(item["x"])
+            slot["hits"] = int(slot["hits"]) + 1
+            slot["miss"] = 0
+            slot["role"] = item.get("role") or slot["role"]
+            used.add(slot_i)
+
+        live_x = [self._slots[i]["x"] for i in used]
+        for i, slot in enumerate(self._slots):
+            if i not in used:
+                if any(abs(slot["x"] - x) < 0.80 for x in live_x):
+                    slot["miss"] = SLOT_HOLD + 1
+                    continue
+                slot["miss"] = int(slot["miss"]) + 1
+        self._slots = [s for s in self._slots if s["miss"] <= SLOT_HOLD]
+        self._freeze_age = 0
+        return self._drawn_from_slots()
+
+
+def snap_polyline_to_paint(pts, frame, calib=None, mask=None, window_m=None):
     """Return the polyline with each point shifted onto nearby paint.
 
     `calib` is the dashcam ground calibration. It sets the search width in
@@ -57,6 +254,8 @@ def snap_polyline_to_paint(pts, frame, calib=None, mask=None, window_m=2.2):
     """
     if pts is None or len(pts) < 2:
         return list(pts) if pts is not None else []
+    if window_m is None:
+        window_m = SNAP_WINDOW_M
     h, w = frame.shape[:2]
     if mask is None:
         mask = lane_paint_mask(frame, calib)
@@ -113,10 +312,12 @@ def snap_polyline_to_paint(pts, frame, calib=None, mask=None, window_m=2.2):
     return out
 
 
-def snap_hit_fraction(pts, frame, calib=None, mask=None, window_m=2.2) -> float:
+def snap_hit_fraction(pts, frame, calib=None, mask=None, window_m=None) -> float:
     """Share of polyline samples that land on paint after the snap search."""
     if not pts:
         return 0.0
+    if window_m is None:
+        window_m = SNAP_WINDOW_M
     h, _w = frame.shape[:2]
     if mask is None:
         mask = lane_paint_mask(frame, calib)

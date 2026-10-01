@@ -17,6 +17,7 @@ from src.utils.drivable_area import (
     force_corridor_fixed_width,
     lane_assoc_x,
     match_lane_by_x,
+    find_ego_lanes,
     pair_gap_m,
     pair_occupancy_ok,
     reconstruct_opposite_boundary,
@@ -39,6 +40,7 @@ class RoadState:
     source: str = "none"
     reconstructed_side: Optional[str] = None
     locked_width_m: Optional[float] = None
+    reset_draw: bool = False
 
     @property
     def has_valid_corridor(self) -> bool:
@@ -76,6 +78,7 @@ class RoadStateEstimator:
         self._lock_hits = 0
         self._last_left_x: Optional[float] = None
         self._last_right_x: Optional[float] = None
+        self._far_dwell = 0
 
     def reset(self) -> None:
         self.__init__()
@@ -174,6 +177,24 @@ class RoadStateEstimator:
                 self._last_left_x = mx - self._locked_w
         return True, ego_left, ego_right, recon, side, missing
 
+    def _far_ego_candidate(self, lanes, ego_left, ego_right):
+        """A real left/right pair sitting in the next lane, not the held one."""
+        cand_l, cand_r = find_ego_lanes(lanes)
+        if cand_l is None or cand_r is None or ego_left is None or ego_right is None:
+            return None
+        gap = pair_gap_m(cand_l, cand_r)
+        if gap is None or not (cfg.EGO_LANE_WIDTH_MIN_M <= gap <= cfg.EGO_LANE_WIDTH_MAX_M):
+            return None
+        xl, xr = lane_assoc_x(cand_l), lane_assoc_x(cand_r)
+        if not pair_occupancy_ok(xl, xr):
+            return None
+        ll, rr = lane_assoc_x(ego_left), lane_assoc_x(ego_right)
+        if ll is None or rr is None:
+            return None
+        if abs(0.5 * (xl + xr) - 0.5 * (ll + rr)) < float(cfg.LANE_CHANGE_CENTER_M):
+            return None
+        return cand_l, cand_r
+
     def update(self, raw_lanes: Optional[Sequence[np.ndarray]], dt: float, speed_mps: Optional[float] = None) -> RoadState:
         raw_lanes = [] if raw_lanes is None else list(raw_lanes)
         tracked_lanes = list(
@@ -197,9 +218,41 @@ class RoadStateEstimator:
         use_onesided = False
         recon = None
         reconstructed_side = None
+        reset_draw = False
         both_raw = self._raw_pair_present(raw_lanes, left_x, right_x)
 
-        if self._width_ready() and not both_raw:
+        sticky_left, sticky_right = ego_left, ego_right
+        far = self._far_ego_candidate(tracked_lanes, sticky_left, sticky_right)
+        if far is not None:
+            self._far_dwell += 1
+        else:
+            self._far_dwell = max(0, self._far_dwell - 1)
+        lc_dwelling = (
+            int(self.ego_pair_tracker.last_meta.get("lc_dwell") or 0) > 0
+            or self._far_dwell > 0
+        )
+        lane_change_now = (
+            far is not None
+            and self._far_dwell >= int(cfg.LANE_CHANGE_DWELL_FRAMES)
+        ) or source == "lane_change"
+
+        if lane_change_now:
+            if far is not None:
+                ego_left, ego_right = far
+                gap = pair_gap_m(ego_left, ego_right)
+            valid_pair = ego_left is not None and ego_right is not None
+            held_pair = False
+            source = "lane_change"
+            reset_draw = True
+            self._clear_width_lock()
+            self._far_dwell = 0
+            if ego_left is not None and ego_right is not None:
+                self._remember_pair_x(ego_left, ego_right)
+        elif (
+            not lc_dwelling
+            and self._width_ready()
+            and not both_raw
+        ):
             ok, os_left, os_right, os_recon, _visible_side, missing = self._try_onesided(
                 raw_lanes, left_x, right_x
             )
@@ -287,8 +340,6 @@ class RoadStateEstimator:
             status = "PREDICTED"
 
         visual_lanes = list(tracked_lanes) if tracked_lanes else list(raw_lanes)
-        if use_onesided and recon is not None:
-            visual_lanes.append(recon)
 
         return RoadState(
             visual_lanes=visual_lanes,
@@ -302,4 +353,5 @@ class RoadStateEstimator:
             source=source,
             reconstructed_side=reconstructed_side,
             locked_width_m=self._locked_w,
+            reset_draw=reset_draw,
         )

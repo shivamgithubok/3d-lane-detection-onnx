@@ -89,13 +89,13 @@ def draw_bev(
             poly_bev = np.array(pts_left_bev + pts_right_bev[::-1], dtype=np.int32)
             overlay = canvas.copy()
             if cipo_status == "DANGER":
-                corridor_color = (70, 40, 255)
+                corridor_color = (25, 40, 255)
             elif cipo_status == "WARNING":
-                corridor_color = (0, 165, 255)
+                corridor_color = (0, 210, 255)
             else:
-                corridor_color = (255, 190, 80)
+                corridor_color = (45, 245, 35)
             cv2.fillPoly(overlay, [poly_bev], corridor_color)
-            cv2.addWeighted(overlay, 0.35, canvas, 0.65, 0, canvas)
+            cv2.addWeighted(overlay, 0.40, canvas, 0.60, 0, canvas)
 
     if proposals is not None and len(proposals) > 0:
         for lane in proposals:
@@ -114,13 +114,11 @@ def draw_bev(
             if len(valid_pts) > 1:
                 mean_x = np.mean([wx for wx, wy in pts_world])
                 if abs(mean_x) < 2.0:
-                    lane_color = (255, 180, 0)
-                elif mean_x < 0:
-                    lane_color = (0, 215, 255)
+                    lane_color, lane_th = (0, 220, 255), 2
                 else:
-                    lane_color = (255, 200, 0)
+                    lane_color, lane_th = (145, 175, 205), 1
                 for i in range(1, len(valid_pts)):
-                    cv2.line(canvas, valid_pts[i - 1], valid_pts[i], lane_color, 2, cv2.LINE_AA)
+                    cv2.line(canvas, valid_pts[i - 1], valid_pts[i], lane_color, lane_th, cv2.LINE_AA)
                 for p in valid_pts[::2]:
                     cv2.circle(canvas, p, 2, (255, 255, 255), -1, cv2.LINE_AA)
 

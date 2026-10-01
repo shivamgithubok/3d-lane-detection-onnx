@@ -121,7 +121,7 @@ class BEVWidget(QWidget):
 
         # Cinematic highway look (reference chase-cam road) — default ON
         self.cinematic_road = True
-        self.show_lane_lines = True  # Anchor3D detected lane overlays only (UI toggle)
+        self.show_lane_lines = False  # corridor-only until LANES toggle is on
 
 
         # Running dashed-lane scroll — advances on detection frames only (no extra timer repaints)
@@ -146,8 +146,10 @@ class BEVWidget(QWidget):
 
     def toggle_lane_lines(self):
         """Show / hide Anchor3D detection lane lines on the BEV canvas."""
-        self.show_lane_lines = not self.show_lane_lines
-        # Detection overlay only — do not rebuild cinematic road paint cache
+        return self.set_lane_lines(not self.show_lane_lines)
+
+    def set_lane_lines(self, on):
+        self.show_lane_lines = bool(on)
         self.update()
         return self.show_lane_lines
 
@@ -683,11 +685,11 @@ class BEVWidget(QWidget):
                 continue
 
             if self.cinematic_road:
-                core = QColor(244, 247, 251, 230)
-                self._stroke_glow_path(painter, valid_pts, core, core_w=2.2, glow_w=0.0, glow_a=0)
+                core = QColor(255, 220, 0, 230) if abs(mean_x) < 2.0 else QColor(205, 175, 145, 200)
+                self._stroke_glow_path(painter, valid_pts, core, core_w=2.2 if abs(mean_x) < 2.0 else 1.0, glow_w=0.0, glow_a=0)
             else:
-                lane_color = QColor(244, 247, 251)
-                painter.setPen(QPen(lane_color, 2.5, Qt.SolidLine))
+                lane_color = QColor(255, 220, 0) if abs(mean_x) < 2.0 else QColor(205, 175, 145)
+                painter.setPen(QPen(lane_color, 2.5 if abs(mean_x) < 2.0 else 1.0, Qt.SolidLine))
                 path = QPainterPath()
                 path.moveTo(valid_pts[0])
                 for pt in valid_pts[1:]:
@@ -750,10 +752,13 @@ class BEVWidget(QWidget):
                                 (left_pt.y() + right_pt.y()) * 0.5,
                             ))
                         if self.cipo_status == "DANGER":
-                            band = QColor(230, 50, 70, 150)
+                            band = QColor(230, 45, 50, 165)
                             core = QColor(255, 210, 214)
+                        elif self.cipo_status == "WARNING":
+                            band = QColor(255, 195, 40, 165)
+                            core = QColor(255, 240, 200)
                         else:
-                            band = QColor(61, 220, 132, 150)
+                            band = QColor(35, 245, 45, 160)
                             core = QColor(216, 255, 232)
                         painter.setPen(Qt.NoPen)
                         painter.setBrush(QBrush(band))

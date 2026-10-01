@@ -566,16 +566,22 @@ class CIPOTracker:
             return
         self._inpath_state[dst_key] = dict(src)
 
-    def _style_for(self, in_path, z):
-        if not in_path:
+    def _style_for(self, in_path, z, lane_index=99):
+        """Box color follows CIPO bands for ego-lane / in-path cars."""
+        ego = bool(in_path) or int(lane_index) == 0
+        if not ego:
             return "OUT OF PATH", (255, 220, 0)
-        if z < self.danger_dist:
-            return "DANGER <15m", (0, 0, 255)
-        return f"IN PATH ({z:.1f}m)", (0, 215, 255)
+        if z < float(_cfg("CIPO_DANGER_ENTER_M", 14.0)):
+            return "DANGER", (0, 0, 255)
+        if z < float(_cfg("CIPO_WARN_ENTER_M", 28.0)):
+            return "WARNING", (0, 165, 255)
+        return "IN PATH", (0, 215, 255)
 
     def _pack_obj(self, st, in_path, path_score=0.0, quality="confirmed"):
         x, z = float(st["x"]), float(st["z"])
-        status, color = self._style_for(in_path, z)
+        status, color = self._style_for(
+            in_path, z, lane_index=int(st.get("lane_index", 99))
+        )
         return {
             "bbox": list(st["bbox"]),
             "label": st["label"],
@@ -613,18 +619,20 @@ class CIPOTracker:
         return int(best_id) if best_id is not None else track_id
 
     def _select_cipo(self, processed_objects):
-        in_path_objs = [
+        ego_objs = [
             obj for obj in processed_objects
-            if obj["in_path"] and int(obj.get("lane_index", 0)) == 0
+            if int(obj.get("lane_index", 99)) == 0
         ]
-        if not in_path_objs:
+        in_path_objs = [obj for obj in ego_objs if obj.get("in_path")]
+        candidates = in_path_objs or ego_objs
+        if not candidates:
             self._cipo_tid = None
             return None
-        closest = min(in_path_objs, key=lambda obj: obj["Z_3d"])
+        closest = min(candidates, key=lambda obj: obj["Z_3d"])
         stick = float(_cfg("CIPO_STICK_MARGIN_M", 5.0))
         current = None
         if self._cipo_tid is not None:
-            for obj in in_path_objs:
+            for obj in candidates:
                 if int(obj.get("track_id", -1)) == int(self._cipo_tid):
                     current = obj
                     break
@@ -822,6 +830,12 @@ class CIPOTracker:
                 )
             # Occupancy may overlap a neighbour; CIPO only if the photo says ego.
             tr.in_path = bool(in_path) and in_path_lane
+            # No paint / weak occupancy still leaves a centered ego-lane car
+            # as in-path so the box follows CIPO (red / amber / cyan).
+            if in_path_lane and not tr.in_path and (score is None or abs(x) <= 2.2):
+                tr.in_path = True
+                if path_score <= 0.0:
+                    path_score = 0.45
             tr.path_score = path_score
             tr.lane_rank = lane_rank
             tr.lane_index = packed_index if packed_index != 99 else None
@@ -851,9 +865,13 @@ class CIPOTracker:
             if int(v[2]) >= self._hist_frame - self._hist_ttl
         }
 
-        cipo_obj = self._select_cipo(processed_objects) if has_corridor else None
-        if cipo_obj is None and not has_corridor:
-            self._cipo_tid = None
+        cipo_obj = self._select_cipo(processed_objects)
+        if cipo_obj is not None:
+            cipo_obj["in_path"] = True
+            for obj in processed_objects:
+                if int(obj.get("track_id", -1)) == int(cipo_obj.get("track_id", -2)):
+                    obj["in_path"] = True
+                    break
         status = self._update_status_band(cipo_obj, road_status, has_corridor)
         self._mark_cipo(processed_objects, cipo_obj, status, quality)
         return processed_objects, cipo_obj

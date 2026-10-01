@@ -59,3 +59,4 @@ src/surround_view/
 models/ufld_tusimple_288x800.onnx
 scripts/tusimple/
 src/inference/tusimple_ufld.py
+scripts/debug

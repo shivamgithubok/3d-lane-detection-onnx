@@ -23,7 +23,7 @@ FCW_PLUS_TTC_S = 1.4
 FCW_PLUS_RANGE_M = 8.0
 FCW_MAX_RANGE_M = 50.0
 FCW_MIN_CLOSE_MPS = 0.5
-FCW_HITS = 3
+FCW_HITS = 2
 FCW_MIN_MPH = 15.0
 FCW_ID_HOLD = 2
 
@@ -188,7 +188,9 @@ class ForwardCollisionWarning:
             return self._clear()
         if cipo_status == "DEGRADED":
             return self._clear()
-        if mph is None or mph < FCW_MIN_MPH:
+        # Unknown ego speed (no HUD JSON) must not disable FCW. Only skip when
+        # we *know* the vehicle is below the moving threshold.
+        if mph is not None and mph < FCW_MIN_MPH:
             return self._clear()
 
         z = float(cipo_obj.get("Z_3d", 99.0))
@@ -206,22 +208,24 @@ class ForwardCollisionWarning:
         v_close = -vy
         if dt and dt > 1e-3 and self._prev_z is not None:
             v_fd = (float(self._prev_z) - z) / float(dt)
-            if v_close < 0.2 and v_fd > v_close:
-                v_close = 0.5 * v_close + 0.5 * v_fd if v_close > 0 else v_fd
+            if v_fd > v_close:
+                v_close = v_fd
         self._prev_z = z
         self.v_close = float(v_close)
 
-        if v_close < FCW_MIN_CLOSE_MPS or z > FCW_MAX_RANGE_M:
-            self.ttc = None
-            return self._clear()
-
-        ttc = z / max(v_close, 1e-3)
-        self.ttc = float(ttc)
+        ttc = z / max(v_close, 1e-3) if v_close >= FCW_MIN_CLOSE_MPS else None
+        self.ttc = float(ttc) if ttc is not None else None
         cand = None
-        if ttc < FCW_PLUS_TTC_S or z < FCW_PLUS_RANGE_M:
+        if z < FCW_PLUS_RANGE_M:
             cand = "FCW+"
-        elif ttc < FCW_TTC_S:
+        elif ttc is not None and ttc < FCW_PLUS_TTC_S:
+            cand = "FCW+"
+        elif ttc is not None and ttc < FCW_TTC_S:
             cand = "FCW"
+        elif cipo_status == "DANGER" and z < 15.0 and v_close >= 0.15:
+            cand = "FCW"
+        elif z > FCW_MAX_RANGE_M or v_close < FCW_MIN_CLOSE_MPS:
+            cand = None
 
         if cand is None:
             return self._clear()
@@ -237,19 +241,52 @@ class ForwardCollisionWarning:
         return self.snapshot()
 
 
+OBJ_ADJ_RANGE_M = 12.0
+OBJ_CROSS_RANGE_M = 8.0
+
+
+def nearby_object_alert(objects, cipo_obj):
+    """True when a close vehicle is beside us, not the FCW lead (CIPO).
+
+    OBJ is the left-stack card under FCW. It fires on:
+      • adjacent-lane vehicle (L±1) inside 12 m
+      • out-of-path vehicle inside 8 m (cross / cut-in / parked-close)
+    Ego-path CIPO is FCW's job, so that track is skipped here.
+    """
+    if not objects:
+        return False
+    cipo_tid = int(cipo_obj.get("track_id", -1)) if cipo_obj else -1
+    for obj in objects:
+        tid = int(obj.get("track_id", -1) or -1)
+        if tid > 0 and tid == cipo_tid:
+            continue
+        z = float(obj.get("Z_3d", 99.0))
+        if z <= 0.0:
+            continue
+        li = int(obj.get("lane_index", 99) or 99)
+        if abs(li) == 1 and z < OBJ_ADJ_RANGE_M:
+            return True
+        if not obj.get("in_path") and z < OBJ_CROSS_RANGE_M:
+            return True
+    return False
+
+
 class AdasWarningTracker:
     def __init__(self):
         self.ldw = LaneDepartureWarning()
         self.fcw = ForwardCollisionWarning()
 
-    def update(self, ego_left, ego_right, road_status, cipo_obj, cipo_status, speed_mps, dt=1.0 / 30.0):
+    def update(self, ego_left, ego_right, road_status, cipo_obj, cipo_status, speed_mps, dt=1.0 / 30.0, objects=None):
         ldw = self.ldw.update(ego_left, ego_right, road_status, speed_mps)
         fcw = self.fcw.update(cipo_obj, cipo_status, speed_mps, dt=dt)
+        obj_on = nearby_object_alert(objects, cipo_obj)
         prio = "none"
         if fcw["status"] == "FCW+":
             prio = "fcw+"
         elif fcw["status"] == "FCW":
             prio = "fcw"
+        elif obj_on:
+            prio = "obj"
         elif ldw["status"] in ("LEFT", "RIGHT"):
             prio = "ldw"
         return {
@@ -261,6 +298,7 @@ class AdasWarningTracker:
             "ttc": fcw["ttc"],
             "v_close": fcw["v_close"],
             "range_m": fcw["range_m"],
+            "obj": obj_on,
             "priority": prio,
         }
 

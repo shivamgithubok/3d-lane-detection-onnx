@@ -132,7 +132,7 @@ class BevQuick3DWidget(QQuickWidget):
         self.left_3d = None
         self.right_3d = None
         self.cinematic_road = True
-        self.show_lane_lines = True
+        self.show_lane_lines = False
         self.env_mode = "auto"
         self.lane_frame = LaneFrameModel()
         self._slots = _SlotTracker()
@@ -231,7 +231,10 @@ class BevQuick3DWidget(QQuickWidget):
         return self.cinematic_road
 
     def toggle_lane_lines(self):
-        self.show_lane_lines = not self.show_lane_lines
+        return self.set_lane_lines(not self.show_lane_lines)
+
+    def set_lane_lines(self, on):
+        self.show_lane_lines = bool(on)
         self._set("showLaneLines", self.show_lane_lines)
         return self.show_lane_lines
 

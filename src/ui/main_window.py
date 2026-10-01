@@ -4,7 +4,7 @@ Hexagonal infotainment cluster: BEV / live camera + HUD chrome.
 """
 
 import numpy as np
-from PySide6.QtCore import Slot
+from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QFileDialog, QStatusBar
 )
@@ -81,6 +81,7 @@ class ADASMainWindow(QMainWindow):
         self.btn_open_video = self.cockpit.btn_open
         self.btn_play.clicked.connect(self.toggle_play_pause)
         self.btn_open_video.clicked.connect(self.open_video_file)
+        self.cockpit.lane_draw_toggled.connect(self.set_lane_draw)
 
         self.calib_panel = CalibrationPanel(
             pitch_deg=self.preset_pitch, height_m=self.preset_height
@@ -127,13 +128,36 @@ class ADASMainWindow(QMainWindow):
         is_paused = self.worker.toggle_pause()
         self.btn_play.setText("▶" if is_paused else "⏸")
 
+    def set_lane_draw(self, on):
+        on = bool(on)
+        self.worker.set_lane_draw(on)
+        if hasattr(self.bev_widget, "set_lane_lines"):
+            self.bev_widget.set_lane_lines(on)
+        elif hasattr(self.bev_widget, "show_lane_lines"):
+            self.bev_widget.show_lane_lines = on
+            self.bev_widget.update()
+        btn = getattr(self.cockpit, "btn_lanes", None)
+        if btn is not None and btn.isChecked() != on:
+            btn.blockSignals(True)
+            btn.setChecked(on)
+            btn.blockSignals(False)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_L and not event.isAutoRepeat():
+            self.set_lane_draw(not bool(self.worker.show_lane_draw))
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def open_video_file(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "Open MP4 Video File", "", "Video Files (*.mp4 *.avi *.mkv)")
         if file_name:
             self.worker.stop()
+            lanes_on = bool(getattr(self.worker, "show_lane_draw", False))
             self.worker = InferenceWorker(video_path=file_name, model_path=self.model_path)
             self.worker.frame_processed.connect(self.on_frame_processed)
             self.worker.status_message.connect(self.on_status_message)
+            self.worker.set_lane_draw(lanes_on)
             if self.calib_panel is not None:
                 self.calib_panel.set_from_calib(self.worker.ground_calib)
             self.worker.start()

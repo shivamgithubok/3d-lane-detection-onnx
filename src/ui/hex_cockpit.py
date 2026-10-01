@@ -478,8 +478,36 @@ class FeatureDeck(QWidget):
             self._closing = False
 
 
+class LaneDrawToggle(QPushButton):
+    """Checkable LANES pill. Off = corridor only; on = draw lane strokes."""
+
+    def __init__(self, parent=None):
+        super().__init__("LANES", parent)
+        self.setCheckable(True)
+        self.setChecked(False)
+        self.setFixedSize(88, 32)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setStyleSheet(
+            "QPushButton {"
+            "  background: rgba(16,20,28,200);"
+            "  color: #C5CDD6;"
+            "  border: 1.5px solid #3A4553;"
+            "  border-radius: 16px;"
+            "  font-size: 12px;"
+            "  font-weight: 700;"
+            "}"
+            "QPushButton:checked {"
+            "  background: rgba(40,32,8,220);"
+            "  color: #F4D03F;"
+            "  border: 1.5px solid #F4D03F;"
+            "}"
+        )
+
+
 class HexCockpit(QWidget):
     view_changed = Signal(str)
+    lane_draw_toggled = Signal(bool)
 
     def __init__(self, bev_widget, parent=None):
         super().__init__(parent)
@@ -510,6 +538,8 @@ class HexCockpit(QWidget):
         self.gear = GearButton(self)
         self.btn_settings = self.gear
         self.glyphs = StatusGlyphs(self)
+        self.btn_lanes = LaneDrawToggle(self)
+        self.btn_lanes.toggled.connect(self.lane_draw_toggled.emit)
 
         self.topbar = QFrame(self)
         self.topbar.setStyleSheet("background:transparent;")
@@ -524,8 +554,11 @@ class HexCockpit(QWidget):
         top.addWidget(self.lbl_clock)
         top.addWidget(self.lbl_temp)
         top.addWidget(self.glyphs)
-        self.lbl_fps = QLabel("FPS —", self)
-        self.lbl_fps.hide()
+        self.lbl_fps = QLabel("FPS —")
+        self.lbl_fps.setStyleSheet(
+            "color:#E8EEF4;font-size:15px;font-weight:700;background:transparent;"
+        )
+        top.addWidget(self.lbl_fps)
 
         self.settings_wheel = FeatureDeck(self)
         self.settings_wheel.confirmed.connect(self._on_menu_choice)
@@ -600,14 +633,14 @@ class HexCockpit(QWidget):
         for widget in (
             self.banner_ldw, self.banner_fcw, self.card_obj,
             self.speed, self.lbl_limit, self.topbar,
-            self.settings_wheel, self.gear,
+            self.settings_wheel, self.gear, self.btn_lanes,
         ):
             widget.raise_()
 
     def resizeEvent(self, event):
         w, h = self.width(), self.height()
         self.stack.setGeometry(0, 0, w, h)
-        self.topbar.setGeometry(w - 360, 14, 332, 28)
+        self.topbar.setGeometry(w - 460, 14, 436, 28)
         gear_x = w - self.gear.width() - 64
         gear_y = 88
         self.gear.move(gear_x, gear_y)
@@ -620,6 +653,7 @@ class HexCockpit(QWidget):
         self.banner_ldw.move(28, 72)
         self.banner_fcw.move(28, 192)
         self.card_obj.move(28, 312)
+        self.btn_lanes.move(28, h - self.btn_lanes.height() - 24)
         if self.settings_wheel.isVisible():
             self.settings_wheel.recenter()
         self._raise_chrome()
@@ -644,7 +678,7 @@ class HexCockpit(QWidget):
         side = str(alerts.get("ldw_side") or "")
         ldw_on = ldw in ("LEFT", "RIGHT") or side in ("LEFT", "RIGHT")
         self.banner_ldw.set_trigger(ldw_on)
-        self.card_obj.set_trigger(False)
+        self.card_obj.set_trigger(bool(alerts.get("obj")))
 
         now = datetime.now()
         minute = now.strftime("%I:%M %p").lstrip("0")

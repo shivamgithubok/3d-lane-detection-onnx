@@ -24,6 +24,7 @@ from src.inference.traffic_sign_detector import (
 )
 from src.inference.lprnet import LPRNetRecognizer, annotate_speed_dets, default_paths as lpr_paths
 from src.inference.ldw_fcw import AdasWarningTracker, draw_adas_alerts
+from src.utils.paint_snap import LaneDrawStabilizer
 from src.utils.split_visualization import draw_front_view_cipo
 from src.utils.camera_transform import CameraTransform
 from src.tracking.road_state import RoadStateEstimator
@@ -90,6 +91,7 @@ class InferenceWorker(QThread):
         self.lpr_engine_path = "models/us_lprnet_baseline18.engine"
         self.running = False
         self.paused = False
+        self.show_lane_draw = False
         # YOLO is created on the worker thread after CUDA is ready (avoids empty/missed frames)
         self.detector = None
         self.sign_detector = None
@@ -110,6 +112,7 @@ class InferenceWorker(QThread):
         self._ui_pitch = None
         self._ui_height = None
         self._lane_view = None
+        self.lane_draw = LaneDrawStabilizer()
 
     def set_calibration(self, pitch_deg, height_m):
         """OpenLane P stays locked. Use set_object_calib for ranging sliders."""
@@ -295,6 +298,7 @@ class InferenceWorker(QThread):
                     if not ret:
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                         last_source_ms = None
+                        self.lane_draw.reset()
                         continue
                     source_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
                     if last_source_ms is not None and source_ms > last_source_ms:
@@ -430,6 +434,7 @@ class InferenceWorker(QThread):
                     cipo_status,
                     speed_mps,
                     dt=source_dt,
+                    objects=processed_objs,
                 )
                 alerts_snap["isa"] = self.isa.snapshot()
 
@@ -453,6 +458,12 @@ class InferenceWorker(QThread):
                         left_corridor_3d=left_3d,
                         right_corridor_3d=right_3d,
                         ground_calib=self.ground_calib,
+                        lane_stabilizer=self.lane_draw,
+                        reset_draw=bool(
+                            road_state is not None and getattr(road_state, "reset_draw", False)
+                        ),
+                        ego_speed_mps=speed_mps,
+                        show_lanes=bool(self.show_lane_draw),
                     )
                     if self.sign_detector is not None:
                         ego_mph = None
@@ -550,3 +561,11 @@ class InferenceWorker(QThread):
     def toggle_pause(self):
         self.paused = not self.paused
         return self.paused
+
+    def toggle_lane_draw(self):
+        self.show_lane_draw = not bool(self.show_lane_draw)
+        return self.show_lane_draw
+
+    def set_lane_draw(self, on):
+        self.show_lane_draw = bool(on)
+        return self.show_lane_draw
