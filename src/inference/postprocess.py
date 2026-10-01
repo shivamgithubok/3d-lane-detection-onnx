@@ -100,6 +100,11 @@ def postprocess_onnx_output(
     max_lanes = cfg.MAX_LANES if max_lanes is None else max_lanes
 
     proposals = reg_proposals[0].copy()
+    # Undo the network's lateral scale bias before anything reads X, so every
+    # gate, width and draw downstream is in real metres.
+    x_scale = float(getattr(cfg, "LANE_X_SCALE", 1.0))
+    if abs(x_scale - 1.0) > 1e-6:
+        proposals[:, 5 : 5 + ANCHOR_LEN] /= x_scale
     logits = softmax(proposals[:, 5 + 3 * ANCHOR_LEN :], axis=1)
     score = 1 - logits[:, 0]
     proposals[:, 1] = score
@@ -174,19 +179,22 @@ def _projective_transformation(P, x, y, z):
     return u, v
 
 
-def decode_lane_pixels(proposal, P_matrix, flat_ground=False):
+def decode_lane_pixels(proposal, P_matrix, flat_ground=False, max_y_m=None, min_y_m=None):
     """
     Project a 3D lane proposal into model-space pixels (480x360).
 
     flat_ground=True forces Z=0 (same ground-plane style as BEV), which
     removes wavy/floating height noise in the front-camera overlay.
     """
-    max_y = float(getattr(cfg, "MAX_LANE_Y_M", 100.0))
+    max_y = float(cfg.MAX_LANE_Y_M if max_y_m is None else max_y_m)
+    min_y = None if min_y_m is None else float(min_y_m)
     if isinstance(proposal, np.ndarray) and proposal.ndim == 2 and proposal.shape[1] == 3:
         xs = proposal[:, 0].astype(np.float64)
         ys = proposal[:, 1].astype(np.float64)
         zs = proposal[:, 2].astype(np.float64)
         keep = ys <= max_y + 1e-6
+        if min_y is not None:
+            keep = keep & (ys >= min_y - 1e-6)
         xs, ys, zs = xs[keep], ys[keep], zs[keep]
     else:
         proposal = clip_proposal_max_y(proposal, max_y)
@@ -198,6 +206,9 @@ def decode_lane_pixels(proposal, P_matrix, flat_ground=False):
         xs = lane_xs[lane_vis].astype(np.float64)
         ys = ANCHOR_Y_STEPS[lane_vis]
         zs = lane_zs[lane_vis].astype(np.float64)
+        if min_y is not None:
+            keep = ys >= min_y - 1e-6
+            xs, ys, zs = xs[keep], ys[keep], zs[keep]
 
     if len(xs) < 2:
         return []

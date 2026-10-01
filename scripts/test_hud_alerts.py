@@ -26,8 +26,8 @@ def main():
     html = cockpit.lbl_limit.text()
     assert "55" in html, html
     assert "89" not in html, html
-    assert not cockpit.banner_fcw.isVisible()
-    assert not cockpit.banner_ldw.isVisible()
+    assert not cockpit.banner_fcw._active
+    assert not cockpit.banner_ldw._active
 
     cockpit.update_hud(
         speed_mps=13.4,
@@ -35,8 +35,8 @@ def main():
         cipo_obj={"Z_3d": 18.0},
         alerts={"isa": {"posted_mph": 55}, "fcw": "OFF", "ldw": "OFF"},
     )
-    assert not cockpit.banner_fcw.isVisible(), "CIPO warning alone must not show FCW"
-    assert not cockpit.banner_ldw.isVisible(), "LDW must wait for a real side trigger"
+    assert not cockpit.banner_fcw._active, "CIPO warning alone must not show FCW"
+    assert not cockpit.banner_ldw._active, "LDW must wait for a real side trigger"
 
     cockpit.update_hud(
         speed_mps=13.4,
@@ -46,8 +46,8 @@ def main():
         fps=12,
         lane_ok=True,
     )
-    assert cockpit.banner_fcw.isVisible(), "FCW banner should show"
-    assert cockpit.banner_ldw.isVisible(), "LDW banner should show"
+    assert cockpit.banner_fcw._active, "FCW card should light"
+    assert cockpit.banner_ldw._active, "LDW card should light"
     assert "55" in cockpit.lbl_limit.text()
 
     out = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tmp_hud_alerts_verify.png"))

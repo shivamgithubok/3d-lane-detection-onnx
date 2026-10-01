@@ -779,8 +779,11 @@ def extract_ego_corridor_3d(
     )
     y_steps = ys_l if ys_l is not None else (ys_r if ys_r is not None else ANCHOR_Y_STEPS)
 
+    y_start = float(getattr(cfg, "CORRIDOR_Y_START_M", 5.0))
     for i in range(min(num_steps, len(y_steps))):
         y_m = y_steps[i]
+        if y_m < y_start - 1e-6:
+            continue
 
         has_l = vis_l[i] if vis_l is not None else False
         has_r = vis_r[i] if vis_r is not None else False
@@ -834,11 +837,13 @@ def get_ego_corridor_sides_2d(
     model_to_target=None,
     left_corridor_3d=None,
     right_corridor_3d=None,
+    image_inset_frac=None,
 ):
     """
     Ego-corridor left/right polylines in image pixels (top → bottom).
 
-    Geometry: 3D ego pair + lateral margin inset (EGO_CORRIDOR_MARGIN_M).
+    Geometry: 3D ego pair. Pass image_inset_frac=0 when the 3D pair is
+    already the draw width (DRAW_CORRIDOR_WIDTH_M).
     Near clip: skip Y < CORRIDOR_Y_START_M and image rows on the bonnet
     (CORRIDOR_IMAGE_HOOD_FRAC from the bottom).
     """
@@ -888,11 +893,18 @@ def get_ego_corridor_sides_2d(
     Lu = np.interp(vs, L[:, 1], L[:, 0])
     Ru = np.interp(vs, R[:, 1], R[:, 0])
 
-    inset_frac_l = 0.0 if use_smoothed_corridor else float(left_margin) / float(STANDARD_LANE_WIDTH)
-    inset_frac_r = 0.0 if use_smoothed_corridor else float(right_margin) / float(STANDARD_LANE_WIDTH)
+    inset_each_side = 0.0 if image_inset_frac is not None else 0.24
+    if image_inset_frac is not None:
+        inset_each_side = float(image_inset_frac)
+    elif not use_smoothed_corridor:
+        inset_each_side = max(
+            0.24,
+            float(left_margin) / float(STANDARD_LANE_WIDTH),
+            float(right_margin) / float(STANDARD_LANE_WIDTH),
+        )
     width = np.maximum(Ru - Lu, 1.0)
-    Lu_i = Lu + inset_frac_l * width
-    Ru_i = Ru - inset_frac_r * width
+    Lu_i = Lu + inset_each_side * width
+    Ru_i = Ru - inset_each_side * width
 
     def map_to_target(us, vs_):
         model_pts = np.column_stack((us, vs_))

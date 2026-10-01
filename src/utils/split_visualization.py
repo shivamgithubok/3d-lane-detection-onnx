@@ -6,8 +6,31 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from src.utils.visualization import draw_bev, world_to_canvas
 from src.inference.postprocess import ANCHOR_Y_STEPS, decode_lane_pixels
-from src.utils.drivable_area import extract_ego_corridor_3d, get_ego_corridor_2d_pixels, get_ego_corridor_sides_2d, fill_missing_lane_gaps, find_ego_lanes, parse_lane_components, parse_lane_components, STANDARD_LANE_WIDTH
+from src.inference import lane_filter_config as lane_cfg
+from src.utils.drivable_area import (
+    extract_ego_corridor_3d,
+    force_corridor_fixed_width,
+    get_ego_corridor_2d_pixels,
+    get_ego_corridor_sides_2d,
+    fill_missing_lane_gaps,
+    find_ego_lanes,
+    parse_lane_components,
+    STANDARD_LANE_WIDTH,
+)
+from src.utils.paint_snap import LaneDrawStabilizer, lane_paint_mask
 from src.utils.draw_3d_box import draw_3d_wireframe_box
+
+# Front-view overlay (BGR): lime / amber / red by CIPO range.
+CORRIDOR_SAFE_FAR = (20, 175, 0)
+CORRIDOR_SAFE_NEAR = (45, 245, 35)
+CORRIDOR_WARN_FAR = (0, 155, 220)
+CORRIDOR_WARN_NEAR = (0, 210, 255)
+CORRIDOR_DANGER_FAR = (0, 25, 170)
+CORRIDOR_DANGER_NEAR = (25, 40, 255)
+EGO_LANE_COLOR = (0, 220, 255)
+ADJ_LANE_COLOR = (145, 175, 205)
+CORRIDOR_FILL_ALPHA = 0.46
+CORRIDOR_INSET_FRAC = 0.12
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -21,28 +44,26 @@ def _draw_pro_detection_box(img, overlay, x1, y1, x2, y2, track_id, label, dist_
       • Dark translucent label chip background (drawn on overlay)
       • Vector line work & crisp drop-shadowed text (drawn on img)
     """
+    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
 
-    # ── 1. Thin 1px border (no fill, no glow) ─────────────────────────────
     cv2.rectangle(img, (x1, y1), (x2, y2), color, 1, cv2.LINE_AA)
 
-    # ── 2. Thin 1px corner brackets ───────────────────────────────────────
     w_box = x2 - x1
     h_box = y2 - y1
-    c_len   = max(8, min(16, w_box // 5, h_box // 5))
+    c_len = max(8, min(16, w_box // 5, h_box // 5))
     c_thick = 1
 
     corners = [
-        (x1, y1,  1,  1),   # Top-Left
-        (x2, y1, -1,  1),   # Top-Right
-        (x1, y2,  1, -1),   # Bottom-Left
-        (x2, y2, -1, -1),   # Bottom-Right
+        (x1, y1,  1,  1),
+        (x2, y1, -1,  1),
+        (x1, y2,  1, -1),
+        (x2, y2, -1, -1),
     ]
     for (cx, cy, dx, dy) in corners:
-        cv2.line(img, (cx, cy), (cx + dx * c_len, cy),           color, c_thick, cv2.LINE_AA)
-        cv2.line(img, (cx, cy), (cx,              cy + dy * c_len), color, c_thick, cv2.LINE_AA)
+        cv2.line(img, (cx, cy), (cx + dx * c_len, cy), color, c_thick, cv2.LINE_AA)
+        cv2.line(img, (cx, cy), (cx, cy + dy * c_len), color, c_thick, cv2.LINE_AA)
 
-    # ── 3. Label chip ─────────────────────────────────────────────────────
-    lbl_lower = label.lower()
+    lbl_lower = (label or "").lower()
     if "truck" in lbl_lower or "bus" in lbl_lower:
         cls_code = "TRUCK"
         cls_icon = "▲"
@@ -54,7 +75,7 @@ def _draw_pro_detection_box(img, overlay, x1, y1, x2, y2, track_id, label, dist_
         cls_icon = "●"
 
     id_str = f"#{track_id:02d}" if (track_id is not None and track_id > 0) else "#--"
-    row1   = f" {id_str}  {cls_icon} {cls_code} "
+    row1 = f" {id_str}  {cls_icon} {cls_code} "
     if lane_index is None or abs(int(lane_index)) > 2:
         row2 = f"  {dist_m:.1f} m  "
     else:
@@ -78,23 +99,19 @@ def _draw_pro_detection_box(img, overlay, x1, y1, x2, y2, track_id, label, dist_
     if chip_y < 2:
         chip_y = y2 + 3
 
-    # Dark translucent chip background (on overlay)
     cv2.rectangle(overlay, (chip_x, chip_y),
-                          (chip_x + chip_w, chip_y + chip_h), (10, 10, 16), -1)
+                  (chip_x + chip_w, chip_y + chip_h), (10, 10, 16), -1)
 
-    # Colored top accent stripe (3px)
     cv2.rectangle(img, (chip_x, chip_y),
-                        (chip_x + chip_w, chip_y + 3), color, -1)
+                  (chip_x + chip_w, chip_y + 3), color, -1)
 
-    # Row 1: ID + class name (soft white, with 1px drop-shadow)
     y_r1 = chip_y + 3 + th1_px + 3
-    cv2.putText(img, row1, (chip_x + 6 + 1, y_r1 + 1), font_r1, fs1, (0, 0, 0),     th1, cv2.LINE_AA)
-    cv2.putText(img, row1, (chip_x + 6,     y_r1),     font_r1, fs1, (220, 220, 220), th1, cv2.LINE_AA)
+    cv2.putText(img, row1, (chip_x + 6 + 1, y_r1 + 1), font_r1, fs1, (0, 0, 0), th1, cv2.LINE_AA)
+    cv2.putText(img, row1, (chip_x + 6, y_r1), font_r1, fs1, (220, 220, 220), th1, cv2.LINE_AA)
 
-    # Row 2: distance (risk color, with 1px drop-shadow)
     y_r2 = y_r1 + th2_px + 5
     cv2.putText(img, row2, (chip_x + 6 + 1, y_r2 + 1), font_r2, fs2, (0, 0, 0), th2, cv2.LINE_AA)
-    cv2.putText(img, row2, (chip_x + 6,     y_r2),     font_r2, fs2, color,       th2, cv2.LINE_AA)
+    cv2.putText(img, row2, (chip_x + 6, y_r2), font_r2, fs2, color, th2, cv2.LINE_AA)
 
 
 
@@ -138,16 +155,16 @@ def _lerp_bgr(a, b, t):
 
 
 def _fill_corridor_gradient(overlay, left_pts, right_pts, danger=False, warning=False):
-    """Banded fill: cyan→violet (safe), amber→orange (warn), magenta→red (danger)."""
+    """Lime (safe), amber (CIPO warning), red (CIPO danger)."""
     n = min(len(left_pts), len(right_pts))
     if n < 2:
         return
     if danger:
-        far_c, near_c = (90, 20, 140), (70, 40, 255)
+        far_c, near_c = CORRIDOR_DANGER_FAR, CORRIDOR_DANGER_NEAR
     elif warning:
-        far_c, near_c = (40, 90, 210), (0, 165, 255)
+        far_c, near_c = CORRIDOR_WARN_FAR, CORRIDOR_WARN_NEAR
     else:
-        far_c, near_c = (200, 70, 170), (255, 210, 60)
+        far_c, near_c = CORRIDOR_SAFE_FAR, CORRIDOR_SAFE_NEAR
     for i in range(n - 1):
         t = i / max(1, n - 2)
         color = _lerp_bgr(far_c, near_c, t)
@@ -159,11 +176,198 @@ def _fill_corridor_gradient(overlay, left_pts, right_pts, danger=False, warning=
 
 
 def _draw_lane_line(img, pts, color, thickness):
-    """BEV-style flat painted lane: continuous anti-aliased polyline, no node dots."""
+    """Flat anti-aliased polyline, no glow."""
     if len(pts) < 2:
         return
     arr = np.asarray(pts, dtype=np.int32).reshape(-1, 1, 2)
-    cv2.polylines(img, [arr], False, color, thickness, cv2.LINE_AA)
+    cv2.polylines(img, [arr], False, color, int(thickness), cv2.LINE_AA)
+
+
+def _lane_stroke_style(role):
+    if role in ("left", "right"):
+        return EGO_LANE_COLOR, 3
+    return ADJ_LANE_COLOR, 1
+
+
+def _corridor_risk(cipo_obj, objects):
+    """CIPO band drives fill: red <~15 m, yellow ~15–30 m, else green."""
+    z = None
+    status = ""
+    if cipo_obj is not None and cipo_obj.get("in_path"):
+        z = float(cipo_obj.get("Z_3d", 999.0))
+        status = str(cipo_obj.get("status") or "")
+    elif objects:
+        in_path = [obj for obj in objects if obj.get("in_path")]
+        if in_path:
+            z = float(min(obj["Z_3d"] for obj in in_path))
+    if status == "DANGER" or (z is not None and z < 15.0):
+        return True, False
+    if status == "WARNING" or (z is not None and z < 30.0):
+        return False, True
+    return False, False
+
+
+def _project_lane_draw_points(lane, P_matrix, frame_transform, w_img, h_img, scale_x, scale_y):
+    """Ego/adjacent lane pixels in the source frame, same filter as the green lines."""
+    if lane is None:
+        return []
+    pts = decode_lane_pixels(
+        lane,
+        P_matrix,
+        flat_ground=False,
+        max_y_m=float(getattr(lane_cfg, "DRAW_LANE_Y_M", lane_cfg.MAX_LANE_Y_M)),
+        min_y_m=float(getattr(lane_cfg, "CORRIDOR_Y_START_M", 10.0)),
+    )
+    model_pts = np.asarray(
+        [(u, v) for u, v in pts if 0 <= u < 480 and 0 <= v < 360],
+        dtype=np.float64,
+    )
+    if len(model_pts) == 0:
+        return []
+    if frame_transform is not None:
+        target_pts = np.asarray(frame_transform.model_to_source(model_pts), dtype=np.float64)
+    else:
+        target_pts = model_pts.copy()
+        target_pts[:, 0] *= scale_x
+        target_pts[:, 1] *= scale_y
+    return [
+        (int(round(u)), int(round(v)))
+        for u, v in target_pts
+        if 0 <= u < w_img and 0 <= v < h_img
+    ]
+
+
+def _inset_polylines(left, right, frac):
+    """Pull a left/right pair inward so the fill sits inside the paint."""
+    L = np.asarray(left, dtype=np.float64)
+    R = np.asarray(right, dtype=np.float64)
+    if len(L) < 2 or len(R) < 2:
+        return None
+    L = L[np.argsort(L[:, 1])]
+    R = R[np.argsort(R[:, 1])]
+    v0 = max(float(L[0, 1]), float(R[0, 1]))
+    v1 = min(float(L[-1, 1]), float(R[-1, 1]))
+    if v1 - v0 < 8:
+        return None
+    vs = np.linspace(v0, v1, 16)
+    lu = np.interp(vs, L[:, 1], L[:, 0])
+    ru = np.interp(vs, R[:, 1], R[:, 0])
+    width = ru - lu
+    if np.median(width) < 12:
+        return None
+    lu = lu + float(frac) * width
+    ru = ru - float(frac) * width
+    left_pts = [(int(round(u)), int(round(v))) for u, v in zip(lu, vs)]
+    right_pts = [(int(round(u)), int(round(v))) for u, v in zip(ru, vs)]
+    return left_pts, right_pts
+
+
+def _lanes_for_stroke(sorted_lanes, ego_left, ego_right):
+    """Ego pair plus one neighbor each side. One line per paint stripe.
+
+    With no ego lock, draw nothing new — the stabilizer holds or fades
+    the last strokes. Picking closest-left/right here is what jumped the
+    overlay across the image when the corridor dropped.
+    """
+    ego_l_idx = ego_r_idx = None
+    for idx, lane in enumerate(sorted_lanes):
+        if ego_left is not None and (
+            np.array_equal(lane, ego_left)
+            or abs(_get_lane_mean_x(lane) - _get_lane_mean_x(ego_left)) < 0.80
+        ):
+            ego_l_idx = idx
+        if ego_right is not None and (
+            np.array_equal(lane, ego_right)
+            or abs(_get_lane_mean_x(lane) - _get_lane_mean_x(ego_right)) < 0.80
+        ):
+            ego_r_idx = idx
+    if ego_l_idx is None and ego_r_idx is None:
+        return []
+    chosen = []
+    for idx, lane in enumerate(sorted_lanes):
+        if idx == ego_l_idx:
+            chosen.append((lane, "left"))
+        elif idx == ego_r_idx:
+            chosen.append((lane, "right"))
+        elif ego_l_idx is not None and idx == ego_l_idx - 1:
+            chosen.append((lane, "adj_l"))
+        elif ego_r_idx is not None and idx == ego_r_idx + 1:
+            chosen.append((lane, "adj_r"))
+    kept = []
+    for lane, role in chosen:
+        x = _get_lane_mean_x(lane)
+        if any(abs(x - _get_lane_mean_x(other)) < 0.80 for other, _role in kept):
+            continue
+        kept.append((lane, role))
+    return kept
+
+
+def stabilized_lane_polylines(
+    proposals,
+    ego_left,
+    ego_right,
+    P_matrix,
+    frame_transform,
+    frame,
+    ground_calib,
+    stabilizer,
+    freeze=False,
+    reset_draw=False,
+):
+    """OpenLane-warp projection, then one locked stroke per physical lane."""
+    h_img, w_img = frame.shape[:2]
+    scale_x = w_img / 480.0
+    scale_y = h_img / 360.0
+    if stabilizer is None:
+        stabilizer = LaneDrawStabilizer()
+    if reset_draw:
+        stabilizer.reset()
+    if freeze:
+        drawn = stabilizer.hold()
+        left_pts = next((d["pts"] for d in drawn if d["role"] == "left"), None)
+        right_pts = next((d["pts"] for d in drawn if d["role"] == "right"), None)
+        return drawn, left_pts, right_pts
+    if proposals is None:
+        return stabilizer.hold() if stabilizer._slots else [], None, None
+    sorted_lanes = sorted(proposals, key=lambda lane: _get_lane_mean_x(lane))
+    items = []
+    for lane, role in _lanes_for_stroke(sorted_lanes, ego_left, ego_right):
+        pts = _project_lane_draw_points(
+            lane, P_matrix, frame_transform, w_img, h_img, scale_x, scale_y
+        )
+        if len(pts) < 2:
+            continue
+        items.append({"x": _get_lane_mean_x(lane), "pts": pts, "role": role})
+    if not items:
+        drawn = stabilizer.hold()
+        left_pts = next((d["pts"] for d in drawn if d["role"] == "left"), None)
+        right_pts = next((d["pts"] for d in drawn if d["role"] == "right"), None)
+        return drawn, left_pts, right_pts
+    paint = lane_paint_mask(frame, ground_calib)
+    drawn = stabilizer.update(items, frame, ground_calib, paint)
+    left_pts = next((d["pts"] for d in drawn if d["role"] == "left"), None)
+    right_pts = next((d["pts"] for d in drawn if d["role"] == "right"), None)
+    return drawn, left_pts, right_pts
+
+
+def _clip_side_to_near_row(pts, v_max):
+    """Cut a far-to-near polyline so it does not pass the ego-lane near row."""
+    if v_max is None or len(pts) < 2:
+        return list(pts)
+    out = []
+    for u, v in pts:
+        if v <= v_max:
+            out.append((int(u), int(v)))
+            continue
+        if out:
+            pu, pv = out[-1]
+            span = float(v) - float(pv)
+            if abs(span) > 1e-3:
+                t = (float(v_max) - float(pv)) / span
+                t = max(0.0, min(1.0, t))
+                out.append((int(round(pu + t * (float(u) - pu))), int(round(v_max))))
+        break
+    return out
 
 
 
@@ -182,12 +386,17 @@ def draw_front_view_cipo(
     road_state_valid=True,
     left_corridor_3d=None,
     right_corridor_3d=None,
+    ground_calib=None,
+    lane_stabilizer=None,
+    reset_draw=False,
+    ego_speed_mps=None,
+    show_lanes=True,
 ):
     """
-    Renders front camera view with ultra-fast single-pass overlay blending:
-      - Translucent cyan→violet drivable corridor (margin inset; clipped above hood)
-      - 3D lane polylines projected with full P_matrix (model Z kept — calibrated look)
-      - Thin 1px 2D detection boxes with ID/class/distance label chips
+    Front camera overlay:
+      - Lime fill inset from ego paint
+      - Optional flat yellow ego / 1px light-brown adjacent strokes
+      - Thin 2D detection boxes with ID / class / distance chips
     """
     annotated = frame.copy()
     overlay   = frame.copy()
@@ -202,13 +411,28 @@ def draw_front_view_cipo(
     if road_state_valid and ego_left is None and ego_right is None:
         ego_left, ego_right = find_ego_lanes(proposals) if proposals is not None else (None, None)
 
-    in_path_objs     = [obj for obj in objects if obj['in_path']]
-    min_dist_in_path = min([obj['Z_3d'] for obj in in_path_objs]) if in_path_objs else 999.0
-    danger           = min_dist_in_path < 15.0
-    warning          = 15.0 <= min_dist_in_path < 30.0
+    danger, warning = _corridor_risk(cipo_obj, objects)
 
-    # ── 1. Drivable area corridor fill (on overlay) ──────────────────────
-    if show_drivable and road_state_valid and proposals is not None:
+    # OpenLane warp projection, one locked stroke per lane. The corridor fill
+    # uses those same strokes so the band and the green lines stay together.
+    lane_strokes, ego_left_pts, ego_right_pts = stabilized_lane_polylines(
+        proposals,
+        ego_left,
+        ego_right,
+        P_matrix,
+        frame_transform,
+        frame,
+        ground_calib,
+        lane_stabilizer,
+        freeze=not road_state_valid,
+        reset_draw=reset_draw,
+    )
+
+    # ── 1. Lime fill, inset from ego paint so the yellow strokes stay clear. ──
+    sides = None
+    if show_drivable and ego_left_pts and ego_right_pts:
+        sides = _inset_polylines(ego_left_pts, ego_right_pts, CORRIDOR_INSET_FRAC)
+    if sides is None and show_drivable and road_state_valid and proposals is not None:
         sides = get_ego_corridor_sides_2d(
             proposals, P_matrix,
             img_size=(480, 360), target_size=(w_img, h_img),
@@ -216,74 +440,49 @@ def draw_front_view_cipo(
             model_to_target=(frame_transform.model_to_source if frame_transform is not None else None),
             left_corridor_3d=left_corridor_3d,
             right_corridor_3d=right_corridor_3d,
+            image_inset_frac=CORRIDOR_INSET_FRAC,
         )
         if sides is not None:
-            _fill_corridor_gradient(overlay, sides[0], sides[1], danger=danger, warning=warning)
+            near_rows = []
+            for lane in (ego_left, ego_right):
+                tips = _project_lane_draw_points(
+                    lane, P_matrix, frame_transform, w_img, h_img, scale_x, scale_y
+                )
+                if tips:
+                    near_rows.append(max(v for _, v in tips))
+            if near_rows:
+                near_v = max(near_rows)
+                left_c = _clip_side_to_near_row(sides[0], near_v)
+                right_c = _clip_side_to_near_row(sides[1], near_v)
+                sides = (left_c, right_c) if len(left_c) >= 2 and len(right_c) >= 2 else None
+    if sides is not None:
+        _fill_corridor_gradient(overlay, sides[0], sides[1], danger=danger, warning=warning)
+        cv2.addWeighted(overlay, CORRIDOR_FILL_ALPHA, annotated, 1.0 - CORRIDOR_FILL_ALPHA, 0, annotated)
 
-    # ── 2. Detection box fills & chips (on overlay & annotated) ───────────
+    # ── 2. Detection boxes: thin outline + dark chip (previous style). ────
+    box_overlay = annotated.copy()
     for obj in objects:
         x1, y1, x2, y2 = obj['bbox']
-        track_id = obj.get('track_id', -1)
-        color    = obj['color']
-        dist_m   = obj['Z_3d']
-        is_cipo  = obj.get('is_cipo', False)
-
         _draw_pro_detection_box(
-            annotated, overlay,
+            annotated, box_overlay,
             x1, y1, x2, y2,
-            track_id=track_id,
+            track_id=obj.get('track_id', -1),
             label=obj['label'],
-            dist_m=dist_m,
-            color=color,
-            is_cipo=is_cipo,
+            dist_m=obj['Z_3d'],
+            color=obj['color'],
+            is_cipo=bool(obj.get('is_cipo', False)),
             lane_index=obj.get("lane_index"),
         )
+    cv2.addWeighted(box_overlay, 0.35, annotated, 0.65, 0, annotated)
 
-    # ── 3. SINGLE PASS ALPHA BLEND FOR ALL OVERLAYS ───────────────────────
-    cv2.addWeighted(overlay, 0.35, annotated, 0.65, 0, annotated)
-
-    # ── 4. Calibrated 3D lane polylines (use model Z + P_matrix) ──────────
-    if proposals is not None:
-        sorted_lanes = sorted(proposals, key=lambda l: _get_lane_mean_x(l))
-
-        ego_l_idx, ego_r_idx = None, None
-        for idx, lane in enumerate(sorted_lanes):
-            if ego_left  is not None and np.array_equal(lane, ego_left):  ego_l_idx = idx
-            if ego_right is not None and np.array_equal(lane, ego_right): ego_r_idx = idx
-
-        no_ego_lock = ego_l_idx is None and ego_r_idx is None
-        for idx, lane in enumerate(sorted_lanes):
-            is_ego = (
-                (ego_left is not None and np.array_equal(lane, ego_left))
-                or (ego_right is not None and np.array_equal(lane, ego_right))
-            )
-            is_adj = (
-                (ego_l_idx is not None and idx == ego_l_idx - 1)
-                or (ego_r_idx is not None and idx == ego_r_idx + 1)
-            )
-            # Corridor fill already shows the ego path — hide those polylines
-            # only while a corridor is actually on screen. If occupancy drops
-            # the fill, keep detected paint visible so lanes do not vanish.
-            if is_ego and road_state_valid:
+    # ── 3. Lane strokes only when the LANES toggle is on ──────────────────
+    if show_lanes:
+        for stroke in lane_strokes:
+            draw_pts = [(int(round(u)), int(round(v))) for u, v in stroke["pts"]]
+            if len(draw_pts) < 2:
                 continue
-            if not is_ego and not is_adj and not no_ego_lock:
-                continue
-            lane_color, thickness = (60, 150, 210), 1
-
-            # flat_ground=False → keep calibrated height (do not zero Z)
-            pts = decode_lane_pixels(lane, P_matrix, flat_ground=False)
-            model_pts = np.asarray([(u, v) for u, v in pts if 0 <= u < 480 and 0 <= v < 360])
-            if frame_transform is not None and len(model_pts) > 0:
-                target_pts = frame_transform.model_to_source(model_pts)
-                draw_pts = [
-                    (int(round(u)), int(round(v)))
-                    for u, v in target_pts
-                    if 0 <= u < w_img and 0 <= v < h_img
-                ]
-            else:
-                draw_pts = [(int(u * scale_x), int(v * scale_y)) for u, v in model_pts]
-            if len(draw_pts) > 1:
-                _draw_lane_line(annotated, draw_pts, lane_color, thickness)
+            lane_color, thickness = _lane_stroke_style(stroke.get("role"))
+            _draw_lane_line(annotated, draw_pts, lane_color, thickness)
 
     return annotated
 

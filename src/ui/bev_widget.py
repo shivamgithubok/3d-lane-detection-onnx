@@ -121,7 +121,7 @@ class BEVWidget(QWidget):
 
         # Cinematic highway look (reference chase-cam road) — default ON
         self.cinematic_road = True
-        self.show_lane_lines = True  # Anchor3D detected lane overlays only (UI toggle)
+        self.show_lane_lines = False  # corridor-only until LANES toggle is on
 
 
         # Running dashed-lane scroll — advances on detection frames only (no extra timer repaints)
@@ -146,8 +146,10 @@ class BEVWidget(QWidget):
 
     def toggle_lane_lines(self):
         """Show / hide Anchor3D detection lane lines on the BEV canvas."""
-        self.show_lane_lines = not self.show_lane_lines
-        # Detection overlay only — do not rebuild cinematic road paint cache
+        return self.set_lane_lines(not self.show_lane_lines)
+
+    def set_lane_lines(self, on):
+        self.show_lane_lines = bool(on)
         self.update()
         return self.show_lane_lines
 
@@ -654,15 +656,15 @@ class BEVWidget(QWidget):
         painter.drawPixmap(0, 0, self._road_cache)
 
         # Decorative dashed separators always on (not tied to Anchor3D toggle)
-        white = QColor(235, 240, 255)
+        white = QColor(244, 247, 251)
         phase = self._dash_phase
         self._draw_dashed_lane_x(
             painter, -1.85, 2.0, 78.0, w, h, white,
-            dash=self._dash_len, gap=self._dash_gap, core_w=2.0, phase=phase,
+            dash=self._dash_len, gap=self._dash_gap, core_w=2.2, phase=phase,
         )
         self._draw_dashed_lane_x(
             painter, 1.85, 2.0, 78.0, w, h, white,
-            dash=self._dash_len, gap=self._dash_gap, core_w=2.0, phase=phase,
+            dash=self._dash_len, gap=self._dash_gap, core_w=2.2, phase=phase,
         )
 
     def _draw_detected_lanes(self, painter, w, h):
@@ -683,17 +685,11 @@ class BEVWidget(QWidget):
                 continue
 
             if self.cinematic_road:
-                # Soft cyan detection overlay — single stroke for FPS
-                core = QColor(120, 220, 255, 180) if abs(mean_x) < 2.2 else QColor(210, 220, 235, 140)
-                self._stroke_glow_path(painter, valid_pts, core, core_w=1.6, glow_w=0.0, glow_a=0)
+                core = QColor(255, 220, 0, 230) if abs(mean_x) < 2.0 else QColor(205, 175, 145, 200)
+                self._stroke_glow_path(painter, valid_pts, core, core_w=2.2 if abs(mean_x) < 2.0 else 1.0, glow_w=0.0, glow_a=0)
             else:
-                if abs(mean_x) < 2.0:
-                    lane_color = QColor(0, 220, 255)
-                elif mean_x < 0:
-                    lane_color = QColor(255, 190, 0)
-                else:
-                    lane_color = QColor(0, 255, 180)
-                painter.setPen(QPen(lane_color, 2.5, Qt.SolidLine))
+                lane_color = QColor(255, 220, 0) if abs(mean_x) < 2.0 else QColor(205, 175, 145)
+                painter.setPen(QPen(lane_color, 2.5 if abs(mean_x) < 2.0 else 1.0, Qt.SolidLine))
                 path = QPainterPath()
                 path.moveTo(valid_pts[0])
                 for pt in valid_pts[1:]:
@@ -741,20 +737,39 @@ class BEVWidget(QWidget):
                     pts_right = [p for p in pts_right if p is not None]
 
                     if len(pts_left) > 1 and len(pts_right) > 1:
-                        corridor_poly = QPolygonF(pts_left + pts_right[::-1])
-                        if self.cinematic_road:
-                            corridor_color = (
-                                QColor(220, 40, 70, 55) if self.cipo_status == "DANGER"
-                                else QColor(40, 180, 255, 50)
-                            )
+                        n = min(len(pts_left), len(pts_right))
+                        # 0.52 of the left-to-right span, centered.
+                        margin = 0.24
+                        inset_l, inset_r, mids = [], [], []
+                        for i in range(n):
+                            left_pt, right_pt = pts_left[i], pts_right[i]
+                            dx = right_pt.x() - left_pt.x()
+                            dy = right_pt.y() - left_pt.y()
+                            inset_l.append(QPointF(left_pt.x() + dx * margin, left_pt.y() + dy * margin))
+                            inset_r.append(QPointF(right_pt.x() - dx * margin, right_pt.y() - dy * margin))
+                            mids.append(QPointF(
+                                (left_pt.x() + right_pt.x()) * 0.5,
+                                (left_pt.y() + right_pt.y()) * 0.5,
+                            ))
+                        if self.cipo_status == "DANGER":
+                            band = QColor(230, 45, 50, 165)
+                            core = QColor(255, 210, 214)
+                        elif self.cipo_status == "WARNING":
+                            band = QColor(255, 195, 40, 165)
+                            core = QColor(255, 240, 200)
                         else:
-                            corridor_color = (
-                                QColor(230, 40, 70, 85) if self.cipo_status == "DANGER"
-                                else QColor(40, 190, 255, 80)
-                            )
-                        painter.setBrush(QBrush(corridor_color))
-                        painter.setPen(QPen(corridor_color.lighter(130), 1.0, Qt.SolidLine))
-                        painter.drawPolygon(corridor_poly)
+                            band = QColor(35, 245, 45, 160)
+                            core = QColor(216, 255, 232)
+                        painter.setPen(Qt.NoPen)
+                        painter.setBrush(QBrush(band))
+                        painter.drawPolygon(QPolygonF(inset_l + inset_r[::-1]))
+                        painter.setBrush(Qt.NoBrush)
+                        painter.setPen(QPen(core, 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                        center_path = QPainterPath()
+                        center_path.moveTo(mids[0])
+                        for pt in mids[1:]:
+                            center_path.lineTo(pt)
+                        painter.drawPath(center_path)
 
             # ── 5. Detected lane overlays ────────────────────────────────────
             self._draw_detected_lanes(painter, w, h)
