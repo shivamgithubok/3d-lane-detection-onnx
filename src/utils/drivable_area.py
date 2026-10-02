@@ -315,6 +315,7 @@ def find_ego_lanes(
     require_c0 = bool(getattr(cfg, "EGO_REQUIRE_CONTAINS_0", True))
     allow_c0 = bool(getattr(cfg, "EGO_OCCUPANCY_FALLBACK_CONTAINS0", False))
     use_legacy = bool(getattr(cfg, "EGO_LEGACY_FALLBACK", False))
+    fallback_max = float(getattr(cfg, "EGO_LANE_WIDTH_FALLBACK_MAX_M", 0.0) or 0.0)
 
     lanes = []
     for lane in proposals:
@@ -328,33 +329,40 @@ def find_ego_lanes(
         return None, None
 
     lanes.sort(key=lambda t: t[0])
-    best = None  # (tier, score, left, right)
-    for i in range(len(lanes)):
-        for j in range(i + 1, len(lanes)):
-            ml, left = lanes[i]
-            mr, right = lanes[j]
-            if ml >= mr:
-                continue
-            tier = pair_occupancy_tier(ml, mr)
-            if tier is None:
-                if require_c0:
-                    continue
-                # Soft historic bracket (same-side neighbour). Keep worse than c0.
-                if not (ml < 0.35 and mr > -0.35):
-                    continue
-                tier = 2
-            elif tier == 1:
-                if not allow_c0 or not _fallback_center_ok(ml, mr):
-                    continue
-            gap = pair_gap_m(left, right, anchor_len)
-            if gap is None or gap < width_min or gap > width_max:
-                continue
-            center = 0.5 * (to_vehicle_x(ml) + to_vehicle_x(mr))
-            score = ego_pair_score(gap, center, width_target)
-            cand = (tier, score, left, right)
-            if best is None or cand[0] < best[0] or (cand[0] == best[0] and cand[1] < best[1]):
-                best = cand
 
+    def _best_pair(wmax):
+        best = None  # (tier, score, left, right)
+        for i in range(len(lanes)):
+            for j in range(i + 1, len(lanes)):
+                ml, left = lanes[i]
+                mr, right = lanes[j]
+                if ml >= mr:
+                    continue
+                tier = pair_occupancy_tier(ml, mr)
+                if tier is None:
+                    if require_c0:
+                        continue
+                    if not (ml < 0.35 and mr > -0.35):
+                        continue
+                    tier = 2
+                elif tier == 1:
+                    if not allow_c0 or not _fallback_center_ok(ml, mr):
+                        continue
+                gap = pair_gap_m(left, right, anchor_len)
+                if gap is None or gap < width_min or gap > wmax:
+                    continue
+                center = 0.5 * (to_vehicle_x(ml) + to_vehicle_x(mr))
+                score = ego_pair_score(gap, center, width_target)
+                cand = (tier, score, left, right)
+                if best is None or cand[0] < best[0] or (cand[0] == best[0] and cand[1] < best[1]):
+                    best = cand
+        return best
+
+    best = _best_pair(width_max)
+    if best is None and fallback_max > width_max:
+        # Both paints exist but the network gap is a bit fat — keep the pair
+        # instead of dropping the ego overlay. Occupancy still required.
+        best = _best_pair(fallback_max)
     if best is not None:
         return best[2], best[3]
     if use_legacy:
@@ -382,6 +390,9 @@ class EgoLanePairTracker:
         self.match_x_m = cfg.EGO_PAIR_MATCH_X_M if match_x_m is None else match_x_m
         self.width_min = cfg.EGO_LANE_WIDTH_MIN_M if width_min is None else width_min
         self.width_max = cfg.EGO_LANE_WIDTH_MAX_M if width_max is None else width_max
+        self.width_fallback_max = float(
+            getattr(cfg, "EGO_LANE_WIDTH_FALLBACK_MAX_M", self.width_max)
+        )
         self.reset()
 
     def reset(self):
@@ -472,7 +483,9 @@ class EgoLanePairTracker:
         cand_ok = False
         cand_c = None
         if cand_l is not None and cand_r is not None:
-            w_ok, _ = self._width_ok(cand_l, cand_r, anchor_len)
+            w_ok, _ = self._width_ok(
+                cand_l, cand_r, anchor_len, hi=max(self.width_max, self.width_fallback_max)
+            )
             cx = lane_assoc_x(cand_l, anchor_len)
             cy = lane_assoc_x(cand_r, anchor_len)
             cand_ok = w_ok and self._occupancy_ok(cx, cy)
@@ -493,7 +506,8 @@ class EgoLanePairTracker:
         if rem_l is not None and rem_r is not None:
             w_ok, _ = self._width_ok(
                 rem_l, rem_r, anchor_len,
-                lo=self.width_min * 0.85, hi=self.width_max * 1.15,
+                lo=self.width_min * 0.85,
+                hi=max(self.width_max * 1.15, self.width_fallback_max),
             )
             rx = lane_assoc_x(rem_l, anchor_len)
             ry = lane_assoc_x(rem_r, anchor_len)

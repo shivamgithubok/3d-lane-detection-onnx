@@ -7,7 +7,7 @@ Item {
     id: root
 
     // Camera — 3rd-person chase, cluster-style (low, behind ego, looking down the road)
-    property real pitchDeg: 13.0
+    property real pitchDeg: 8.0
     property real yawDeg: 0.0
     property real zoomFactor: 1.08
     property real camH: 5.0
@@ -342,7 +342,7 @@ Item {
     // Screen-space sun/moon (azimuth → X, elevation → height above horizon band).
     readonly property real sunDiscSize: (root.sunIsMoon ? 22 : 28) * root.sunGlowScale
     readonly property real sunScreenX: width * (0.5 + root.sunAzim / 145.0) - sunDiscSize * 1.3
-    // Keep the disc in the visible sky band (above the road horizon ~40% down).
+    // Keep the disc in the visible sky band (above the road horizon ~34% down).
     readonly property real sunScreenY: {
         const y = height * (0.33 - root.sunElev * 0.20) - sunDiscSize * 1.3
         return Math.max(6, Math.min(height * 0.36, y))
@@ -1290,7 +1290,7 @@ Item {
                         onClicked: {
                             const key = parent.modelData.key
                             if (key === "reset") {
-                                root.pitchDeg = 13
+                                root.pitchDeg = 8
                                 root.yawDeg = 0
                                 root.zoomFactor = 1.08
                                 root.panX = 0

@@ -60,3 +60,13 @@ models/ufld_tusimple_288x800.onnx
 scripts/tusimple/
 src/inference/tusimple_ufld.py
 scripts/debug
+models/calib
+data/3d_bike
+data/cache
+data/front
+data/images
+data/sides_car
+data/surround_view
+data/traffic_signs
+data/truck
+data/3d_person
