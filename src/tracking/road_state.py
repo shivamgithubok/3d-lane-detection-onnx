@@ -209,7 +209,18 @@ class RoadStateEstimator:
         valid_pair = False
         if ego_left is not None and ego_right is not None:
             gap = pair_gap_m(ego_left, ego_right)
-            valid_pair = gap is not None and cfg.EGO_LANE_WIDTH_MIN_M <= gap <= cfg.EGO_LANE_WIDTH_MAX_M
+            wmax = float(cfg.EGO_LANE_WIDTH_MAX_M)
+            wfb = float(getattr(cfg, "EGO_LANE_WIDTH_FALLBACK_MAX_M", wmax))
+            valid_pair = gap is not None and cfg.EGO_LANE_WIDTH_MIN_M <= gap <= wmax
+            if (
+                not valid_pair
+                and gap is not None
+                and cfg.EGO_LANE_WIDTH_MIN_M <= gap <= wfb
+            ):
+                # Wide-but-occupying ego paints: keep overlay; do not lock W.
+                valid_pair = pair_occupancy_ok(
+                    lane_assoc_x(ego_left), lane_assoc_x(ego_right)
+                )
 
         held_pair = bool(self.ego_pair_tracker.last_meta.get("held", False))
         source = str(self.ego_pair_tracker.last_meta.get("source") or "none")

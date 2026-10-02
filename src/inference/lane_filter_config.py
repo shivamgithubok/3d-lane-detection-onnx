@@ -56,6 +56,10 @@ EGO_LANE_WIDTH_MIN_M = 2.9     # reject pairs narrower than a real lane
 # True-metre window around a 3.7 m highway lane. The unscaled 2.8–4.8
 # band was matching the network's 4.54 m ego gap, not paint.
 EGO_LANE_WIDTH_MAX_M = 4.1     # reject pairs that span 2+ lanes
+# If no pair sits in 2.9–4.1 m but both ego paints exist a bit too wide
+# (network leftover after LANE_X_SCALE), still lock them. Two-lane gaps
+# are ~7.4 m, so 5.1 stays one inflated lane. 3D / CIPO still clamps to 3.7.
+EGO_LANE_WIDTH_FALLBACK_MAX_M = 5.1
 EGO_LANE_WIDTH_TARGET_M = 3.7  # prefer pairs near standard lane width
 EGO_CORRIDOR_MARGIN_M = 0.24   # 3D / CIPO inset; front fill uses DRAW_CORRIDOR_WIDTH_M instead
 CORRIDOR_WIDTH_MAX_M = 3.9     # if ego pair is wider, shrink to target around center
