@@ -23,6 +23,7 @@ testing_new_videos/
 *.jpeg
 *.webp
 *.gif
+!data/demo/clip_8s.gif
 *.bmp
 *.tiff
 *.ico
