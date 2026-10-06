@@ -24,6 +24,8 @@ testing_new_videos/
 *.webp
 *.gif
 !data/demo/clip_8s.gif
+!data/demo/live_view.gif
+!data/demo/BEV.gif
 *.bmp
 *.tiff
 *.ico

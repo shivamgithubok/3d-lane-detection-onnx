@@ -19,9 +19,20 @@ The BEV is lane-anchored: the ego corridor remains fixed on the canvas while the
 
 Input frames are cropped **20%** from the top (sky) and stretch-resized to **480×360** (`src/utils/camera_transform.py`) to restore OpenLane-trained framing. The projection matrix uses OpenLane extrinsics (−3° / 1.5 m); the crop maps source geometry to the model and does not change those extrinsics.
 
-<p align="center">
-  <img src="data/demo/clip_8s.gif" alt="8-second demo clip" width="720"/>
-</p>
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="data/demo/live_view.gif" alt="Live view" width="100%"/>
+      <br/>
+      <b>Live view</b> — front camera, lanes, and warnings
+    </td>
+    <td align="center" width="50%">
+      <img src="data/demo/BEV.gif" alt="Bird's-eye view" width="100%"/>
+      <br/>
+      <b>BEV</b> — lane-anchored bird’s-eye view
+    </td>
+  </tr>
+</table>
 
 ## Quick Start
 
